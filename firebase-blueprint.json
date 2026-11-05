@@ -1,0 +1,93 @@
+{
+  "entities": {
+    "Task": {
+      "title": "Task",
+      "description": "Personal workspace task item for study or freelance client work",
+      "type": "object",
+      "properties": {
+        "userId": { "type": "string", "description": "Google UID of the owner" },
+        "title": { "type": "string", "description": "Title of the task" },
+        "description": { "type": "string", "description": "Detailed task instructions" },
+        "category": { "type": "string", "description": "Category: Study, Design, General" },
+        "priority": { "type": "string", "description": "Priority level: High, Medium, Low" },
+        "status": { "type": "string", "description": "Status: TODO, IN_PROGRESS, COMPLETED" },
+        "dueDate": { "type": "string", "description": "ISO date string or deadline" },
+        "workspace": { "type": "string", "description": "Active workspace mode: study or design" },
+        "voiceNote": { "type": "string", "description": "Transcribed voice note or audio transcription memo" },
+        "createdAt": { "type": "string", "format": "date-time", "description": "Server timestamp of creation" },
+        "updatedAt": { "type": "string", "format": "date-time", "description": "Server timestamp of last update" }
+      },
+      "required": ["userId", "title", "status", "workspace", "createdAt", "updatedAt"]
+    },
+    "CalendarEvent": {
+      "title": "CalendarEvent",
+      "description": "Calendar reminder and schedule event with Malayalam Panchangam context",
+      "type": "object",
+      "properties": {
+        "userId": { "type": "string", "description": "Google UID of the owner" },
+        "title": { "type": "string", "description": "Event title" },
+        "date": { "type": "string", "description": "Date format YYYY-MM-DD" },
+        "time": { "type": "string", "description": "Time in HH:mm or flexible format" },
+        "notes": { "type": "string", "description": "Additional notes" },
+        "vibrationTrigger": { "type": "string", "description": "Vibration feedback setting: Gentle, Pulse, Strong, None" },
+        "panchangam": { "type": "string", "description": "Kerala Malayalam Panchangam detail (Nakshatra, Tithi)" },
+        "createdAt": { "type": "string", "format": "date-time", "description": "Server timestamp of creation" },
+        "updatedAt": { "type": "string", "format": "date-time", "description": "Server timestamp of last update" }
+      },
+      "required": ["userId", "title", "date", "createdAt", "updatedAt"]
+    },
+    "TransferItem": {
+      "title": "TransferItem",
+      "description": "Cross-device transfer payload or clipboard snippet for multi-surface sync",
+      "type": "object",
+      "properties": {
+        "userId": { "type": "string", "description": "Google UID of the owner" },
+        "title": { "type": "string", "description": "Transfer snippet title or file name" },
+        "content": { "type": "string", "description": "Clipboard text, code snippet, URL or file metadata" },
+        "type": { "type": "string", "description": "Type: CLIPBOARD, FILE, CODE, MEDIA" },
+        "fileName": { "type": "string", "description": "Optional file name" },
+        "fileSize": { "type": "string", "description": "Human readable file size" },
+        "devices": {
+          "type": "array",
+          "description": "Target device routes (Laptop, Mobile, Smart TV)"
+        },
+        "status": { "type": "string", "description": "Delivery status: SYNCED, DELIVERED, PENDING" },
+        "pinVerified": { "type": "boolean", "description": "Whether 4-digit security PIN was verified" },
+        "createdAt": { "type": "string", "format": "date-time", "description": "Server timestamp of creation" },
+        "updatedAt": { "type": "string", "format": "date-time", "description": "Server timestamp of last update" }
+      },
+      "required": ["userId", "title", "content", "type", "createdAt", "updatedAt"]
+    },
+    "UserSettings": {
+      "title": "UserSettings",
+      "description": "User preferences, security transfer PIN and workspace state",
+      "type": "object",
+      "properties": {
+        "userId": { "type": "string", "description": "Google UID of the owner" },
+        "securityPin": { "type": "string", "description": "4-digit security transfer PIN (default 8492)" },
+        "currentWorkspace": { "type": "string", "description": "study or design" },
+        "createdAt": { "type": "string", "format": "date-time", "description": "Server timestamp of creation" },
+        "updatedAt": { "type": "string", "format": "date-time", "description": "Server timestamp of last update" }
+      },
+      "required": ["userId", "securityPin", "currentWorkspace", "createdAt", "updatedAt"]
+    }
+  },
+  "firestore": {
+    "/users/{userId}/tasks/{taskId}": {
+      "schema": { "$ref": "#/entities/Task" },
+      "description": "User scoped tasks collection"
+    },
+    "/users/{userId}/events/{eventId}": {
+      "schema": { "$ref": "#/entities/CalendarEvent" },
+      "description": "User scoped calendar reminders collection"
+    },
+    "/users/{userId}/transfers/{transferId}": {
+      "schema": { "$ref": "#/entities/TransferItem" },
+      "description": "User scoped cross-device transfer records"
+    },
+    "/users/{userId}/settings/{settingId}": {
+      "schema": { "$ref": "#/entities/UserSettings" },
+      "description": "User scoped workspace preferences"
+    }
+  }
+}

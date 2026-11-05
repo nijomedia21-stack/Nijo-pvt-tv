@@ -1,0 +1,102 @@
+rules_version = '2';
+
+service cloud.firestore {
+  match /databases/{database}/documents {
+
+    function isSignedIn() {
+      return request.auth != null;
+    }
+
+    function isOwner(userId) {
+      return isSignedIn() && request.auth.uid == userId;
+    }
+
+    function incoming() {
+      return request.resource.data;
+    }
+
+    function existing() {
+      return resource.data;
+    }
+
+    function isValidTask(userId) {
+      return incoming().userId == userId &&
+        incoming().title is string && incoming().title.size() > 0 && incoming().title.size() <= 200 &&
+        incoming().status in ['TODO', 'IN_PROGRESS', 'COMPLETED'] &&
+        incoming().workspace in ['study', 'design'] &&
+        (!('description' in incoming()) || incoming().description is string) &&
+        (!('category' in incoming()) || incoming().category is string) &&
+        (!('priority' in incoming()) || incoming().priority is string) &&
+        (!('dueDate' in incoming()) || incoming().dueDate is string) &&
+        (!('voiceNote' in incoming()) || incoming().voiceNote is string) &&
+        incoming().createdAt is timestamp && incoming().createdAt <= request.time &&
+        incoming().updatedAt is timestamp && incoming().updatedAt <= request.time;
+    }
+
+    function isValidEvent(userId) {
+      return incoming().userId == userId &&
+        incoming().title is string && incoming().title.size() > 0 && incoming().title.size() <= 200 &&
+        incoming().date is string && incoming().date.size() <= 30 &&
+        (!('time' in incoming()) || incoming().time is string) &&
+        (!('notes' in incoming()) || incoming().notes is string) &&
+        (!('vibrationTrigger' in incoming()) || incoming().vibrationTrigger is string) &&
+        (!('panchangam' in incoming()) || incoming().panchangam is string) &&
+        incoming().createdAt is timestamp && incoming().createdAt <= request.time &&
+        incoming().updatedAt is timestamp && incoming().updatedAt <= request.time;
+    }
+
+    function isValidTransfer(userId) {
+      return incoming().userId == userId &&
+        incoming().title is string && incoming().title.size() > 0 && incoming().title.size() <= 200 &&
+        incoming().content is string && incoming().content.size() <= 50000 &&
+        incoming().type in ['CLIPBOARD', 'FILE', 'CODE', 'MEDIA'] &&
+        (!('fileName' in incoming()) || incoming().fileName is string) &&
+        (!('fileSize' in incoming()) || incoming().fileSize is string) &&
+        (!('devices' in incoming()) || (incoming().devices is list && incoming().devices.size() <= 10)) &&
+        (!('status' in incoming()) || incoming().status is string) &&
+        (!('pinVerified' in incoming()) || incoming().pinVerified is bool) &&
+        incoming().createdAt is timestamp && incoming().createdAt <= request.time &&
+        incoming().updatedAt is timestamp && incoming().updatedAt <= request.time;
+    }
+
+    function isValidSettings(userId) {
+      return incoming().userId == userId &&
+        incoming().securityPin is string && incoming().securityPin.size() >= 4 && incoming().securityPin.size() <= 8 &&
+        incoming().currentWorkspace in ['study', 'design'] &&
+        incoming().createdAt is timestamp && incoming().createdAt <= request.time &&
+        incoming().updatedAt is timestamp && incoming().updatedAt <= request.time;
+    }
+
+    match /users/{userId} {
+      allow read, write: if isOwner(userId);
+
+      match /tasks/{taskId} {
+        allow read: if isOwner(userId);
+        allow create: if isOwner(userId) && isValidTask(userId);
+        allow update: if isOwner(userId) && isValidTask(userId);
+        allow delete: if isOwner(userId);
+      }
+
+      match /events/{eventId} {
+        allow read: if isOwner(userId);
+        allow create: if isOwner(userId) && isValidEvent(userId);
+        allow update: if isOwner(userId) && isValidEvent(userId);
+        allow delete: if isOwner(userId);
+      }
+
+      match /transfers/{transferId} {
+        allow read: if isOwner(userId);
+        allow create: if isOwner(userId) && isValidTransfer(userId);
+        allow update: if isOwner(userId) && isValidTransfer(userId);
+        allow delete: if isOwner(userId);
+      }
+
+      match /settings/{settingId} {
+        allow read: if isOwner(userId);
+        allow create: if isOwner(userId) && isValidSettings(userId);
+        allow update: if isOwner(userId) && isValidSettings(userId);
+        allow delete: if isOwner(userId);
+      }
+    }
+  }
+}

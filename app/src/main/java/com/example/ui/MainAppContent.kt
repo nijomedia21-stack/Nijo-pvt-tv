@@ -13,6 +13,7 @@ import androidx.compose.animation.slideOutVertically
 import androidx.compose.foundation.background
 import androidx.compose.foundation.border
 import androidx.compose.foundation.clickable
+import androidx.compose.foundation.focusable
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.Column
@@ -32,20 +33,26 @@ import androidx.compose.foundation.shape.CircleShape
 import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.foundation.verticalScroll
 import androidx.compose.material.icons.Icons
-import androidx.compose.material.icons.filled.Bluetooth
-import androidx.compose.material.icons.filled.CheckCircle
+import androidx.compose.material.icons.filled.CleaningServices
 import androidx.compose.material.icons.filled.Code
 import androidx.compose.material.icons.filled.ContentCopy
+import androidx.compose.material.icons.filled.Delete
 import androidx.compose.material.icons.filled.Download
 import androidx.compose.material.icons.filled.Edit
+import androidx.compose.material.icons.filled.Folder
 import androidx.compose.material.icons.filled.FolderZip
+import androidx.compose.material.icons.filled.History
 import androidx.compose.material.icons.filled.Image
 import androidx.compose.material.icons.filled.Info
 import androidx.compose.material.icons.filled.Laptop
 import androidx.compose.material.icons.filled.NotificationsActive
+import androidx.compose.material.icons.filled.PictureAsPdf
 import androidx.compose.material.icons.filled.QrCode
 import androidx.compose.material.icons.filled.QrCodeScanner
+import androidx.compose.material.icons.filled.Settings
 import androidx.compose.material.icons.filled.Smartphone
+import androidx.compose.material.icons.filled.Storage
+import androidx.compose.material.icons.filled.Tv
 import androidx.compose.material.icons.filled.Wifi
 import androidx.compose.material3.Button
 import androidx.compose.material3.ButtonDefaults
@@ -70,11 +77,12 @@ import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.clip
-import androidx.compose.ui.graphics.Color
+import androidx.compose.ui.graphics.vector.ImageVector
 import androidx.compose.ui.layout.ContentScale
 import androidx.compose.ui.platform.LocalClipboardManager
 import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.platform.testTag
+import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.text.AnnotatedString
 import androidx.compose.ui.text.font.FontFamily
 import androidx.compose.ui.text.font.FontWeight
@@ -86,6 +94,8 @@ import coil.compose.SubcomposeAsyncImage
 import coil.request.ImageRequest
 import com.example.data.models.TransferItem
 import com.example.data.repository.FirestoreRepository
+import com.example.data.service.StorageStatus
+import com.example.data.service.TvFileManager
 import com.example.ui.theme.AccentTeal
 import com.example.ui.theme.CharcoalText
 import com.example.ui.theme.ElectricCyan
@@ -105,8 +115,6 @@ import okhttp3.OkHttpClient
 import okhttp3.Request
 import org.json.JSONObject
 import java.io.BufferedReader
-import java.io.File
-import java.io.FileOutputStream
 import java.io.InputStreamReader
 import java.net.URLEncoder
 import java.time.LocalTime
@@ -126,15 +134,16 @@ fun MainAppContent(
     val clipboardManager = LocalClipboardManager.current
     val coroutineScope = rememberCoroutineScope()
     val sharedPrefs = remember { context.getSharedPreferences(PREFS_NAME, Context.MODE_PRIVATE) }
+    val fileManager = remember { TvFileManager(context) }
 
-    // Host IP configuration (default: 192.168.1.2:4000, persisted)
+    // Host IP configuration (default: 192.168.1.2:4000)
     var hostIpInput by remember {
         mutableStateOf(sharedPrefs.getString(KEY_HOST_IP, DEFAULT_HOST_IP) ?: DEFAULT_HOST_IP)
     }
     var showIpDialog by remember { mutableStateOf(false) }
-    var showInstallGuideDialog by remember { mutableStateOf(false) }
+    var showSettingsDialog by remember { mutableStateOf(false) }
 
-    // Normalize Host address & base URL
+    // Normalize Host address & URL
     val cleanHost = remember(hostIpInput) {
         val raw = hostIpInput.trim().removePrefix("http://").removePrefix("https://").trimEnd('/')
         if (raw.contains(":")) raw else "$raw:4000"
@@ -146,15 +155,40 @@ fun MainAppContent(
     var isConnectedToHub by remember { mutableStateOf(false) }
     var connectionStatusText by remember { mutableStateOf("Listening") }
 
-    // Real-time transfer records (strictly TV targeted or all)
+    // Real TV Storage Status
+    var storageStatus by remember {
+        mutableStateOf(
+            StorageStatus(
+                usedPercent = 22,
+                availableBytes = 12L * 1024L * 1024L * 1024L,
+                totalBytes = 16L * 1024L * 1024L * 1024L,
+                usedBytes = 4L * 1024L * 1024L * 1024L,
+                receivedFilesCount = 0,
+                receivedFilesSizeBytes = 0L
+            )
+        )
+    }
+
+    // Refresh real TV storage status
+    LaunchedEffect(Unit) {
+        storageStatus = fileManager.getStorageStatusAndAutoClean()
+        while (isActive) {
+            delay(15000L)
+            storageStatus = fileManager.getStorageStatusAndAutoClean()
+        }
+    }
+
+    // Real-time transfer records from Repository
     val allTransfers by repository.observeTransfers().collectAsState(initial = emptyList())
-    val tvTransfers = remember(allTransfers) {
-        allTransfers.filter { it.target == "tv" || it.target == "all" }
+
+    // De-duplicate transfers strictly by title/filename to prevent duplicate items
+    val deduplicatedTransfers = remember(allTransfers) {
+        allTransfers.distinctBy { (if (it.fileName.isNotBlank()) it.fileName else it.title).lowercase() }
     }
 
     // Active incoming notification banner state
     var activeNotification by remember { mutableStateOf<String?>(null) }
-    var lastHandledCount by remember { mutableStateOf(tvTransfers.size) }
+    var lastHandledCount by remember { mutableStateOf(deduplicatedTransfers.size) }
     var selectedItemForDetail by remember { mutableStateOf<TransferItem?>(null) }
 
     // Digital clock
@@ -167,9 +201,7 @@ fun MainAppContent(
         }
     }
 
-    // ZERO-CLICK AUTO-DOWNLOAD & SSE LISTENER:
-    // Connects to http://<HOST_IP>/events
-    // When target === 'tv' or 'all', auto-triggers file download and adds to UI immediately
+    // ZERO-CLICK AUTO-DOWNLOAD & SSE LISTENER
     LaunchedEffect(eventsUrl) {
         withContext(Dispatchers.IO) {
             val client = OkHttpClient.Builder()
@@ -200,11 +232,11 @@ fun MainAppContent(
                                         if (jsonString.isNotBlank() && jsonString.startsWith("{")) {
                                             try {
                                                 val json = JSONObject(jsonString)
-                                                val sender = json.optString("sender", "laptop")
+                                                val sender = json.optString("sender", "phone")
                                                 val target = json.optString("target", "all")
                                                 val fileName = json.optString("filename", "received_file")
                                                 val title = json.optString("title", fileName)
-                                                val content = json.optString("content", "Transferred via LocalSend Protocol")
+                                                val content = json.optString("content", "Transferred via Local Wi-Fi")
                                                 val fileSize = json.optString("filesize", json.optString("size", "1.5 MB"))
                                                 val rawUrl = json.optString("url", "")
                                                 val downloadUrl = if (rawUrl.startsWith("http")) {
@@ -215,31 +247,30 @@ fun MainAppContent(
                                                     "$baseUrl/download/$fileName"
                                                 }
 
-                                                // Zero-Click Auto Download for TV
+                                                // Auto-trigger download for TV
                                                 if (target == "tv" || target == "all") {
-                                                    // Trigger background auto-download immediately without remote button press
-                                                    coroutineScope.launch(Dispatchers.IO) {
-                                                        try {
-                                                            val dlReq = Request.Builder().url(downloadUrl).build()
-                                                            client.newCall(dlReq).execute().use { dlResp ->
-                                                                if (dlResp.isSuccessful) {
-                                                                    val file = File(context.cacheDir, fileName)
-                                                                    FileOutputStream(file).use { out ->
-                                                                        dlResp.body?.byteStream()?.copyTo(out)
-                                                                    }
-                                                                }
-                                                            }
-                                                        } catch (_: Exception) {}
+                                                    coroutineScope.launch {
+                                                        fileManager.downloadOrRedownload(downloadUrl, fileName)
+                                                        storageStatus = fileManager.getStorageStatusAndAutoClean()
                                                     }
 
-                                                    // Push transfer to Repository for live UI update
+                                                    val fileType = when {
+                                                        fileName.endsWith(".jpg") || fileName.endsWith(".png") || fileName.endsWith(".jpeg") -> "IMAGE"
+                                                        fileName.endsWith(".pdf") || fileName.endsWith(".doc") || fileName.endsWith(".docx") -> "FILE"
+                                                        fileName.endsWith(".zip") || fileName.endsWith(".tar") || fileName.endsWith(".gz") -> "FILE"
+                                                        fileName.endsWith(".kt") || fileName.endsWith(".py") || fileName.endsWith(".js") || fileName.endsWith(".json") -> "CODE"
+                                                        else -> "FILE"
+                                                    }
+
+                                                    val destTags = if (target == "all") listOf("All 3 Devices") else listOf("TV")
+
                                                     repository.pushTransfer(
                                                         title = title,
                                                         content = content,
-                                                        type = if (fileName.endsWith(".zip") || fileName.endsWith(".tar")) "FILE" else if (fileName.endsWith(".kt") || fileName.endsWith(".js") || fileName.endsWith(".py")) "CODE" else if (fileName.endsWith(".png") || fileName.endsWith(".jpg") || fileName.endsWith(".jpeg")) "IMAGE" else "FILE",
+                                                        type = fileType,
                                                         fileName = fileName,
                                                         fileSize = fileSize,
-                                                        devices = listOf("Android TV"),
+                                                        devices = destTags,
                                                         pinVerified = true,
                                                         sender = sender,
                                                         target = target,
@@ -266,16 +297,17 @@ fun MainAppContent(
     }
 
     // Auto-Alert and Auto-Download Notification Banner
-    LaunchedEffect(tvTransfers.size) {
-        if (tvTransfers.isNotEmpty() && tvTransfers.size > lastHandledCount) {
-            val latest = tvTransfers.first()
-            activeNotification = "Auto-Downloaded from ${latest.sender.replaceFirstChar { it.uppercase() }}: ${latest.title}"
+    LaunchedEffect(deduplicatedTransfers.size) {
+        if (deduplicatedTransfers.isNotEmpty() && deduplicatedTransfers.size > lastHandledCount) {
+            val latest = deduplicatedTransfers.first()
+            activeNotification = "Auto-Downloaded: ${latest.title}"
             triggerAlert(context)
             Toast.makeText(context, "Zero-Click Download: ${latest.title}", Toast.LENGTH_SHORT).show()
+            storageStatus = fileManager.getStorageStatusAndAutoClean()
             delay(5000L)
             activeNotification = null
         }
-        lastHandledCount = tvTransfers.size
+        lastHandledCount = deduplicatedTransfers.size
     }
 
     Box(
@@ -285,100 +317,106 @@ fun MainAppContent(
     ) {
         Column(modifier = Modifier.fillMaxSize()) {
 
-            // Top Bar: Clean White, Navy Logo, Host Server IP Indicator, Clock (NO ROLE SWITCHER)
-            DedicatedTvHeader(
-                cleanHost = cleanHost,
-                isConnected = isConnectedToHub,
-                connectionStatus = connectionStatusText,
+            // ULTRA-MINIMALIST TOP BAR (App Brand, Real TV Storage, Settings Button, Clock)
+            UltraMinimalistHeader(
+                storageStatus = storageStatus,
                 timeString = timeString,
-                onEditIp = { showIpDialog = true },
-                onOpenInstallGuide = { showInstallGuideDialog = true }
+                onOpenSettings = { showSettingsDialog = true }
             )
 
             Divider(color = SlateBorder, thickness = 1.dp)
 
-            // STRICT 50/50 SPLIT LAYOUT:
-            // Left Side (50%):
-            //   - Top (1/4th vertical space): Pure white padded QR Code Card + editable Host IP
-            //   - Bottom: "Waiting for files..." status & active incoming file card
-            // Right Side (50%):
-            //   - Full "History" list of received files
+            // MAIN ULTRA-MINIMALIST TV SCREEN: REDUCED TO 3-4 CORE ELEMENTS
+            // Left (approx 45%): Phone QR Scan & Laptop Wi-Fi Hub
+            // Right (approx 55%): Latest Received File & Remote Test Simulators
             Row(
                 modifier = Modifier
                     .fillMaxWidth()
                     .weight(1f)
                     .background(PureWhite)
-                    .padding(16.dp),
-                horizontalArrangement = Arrangement.spacedBy(16.dp)
+                    .padding(18.dp),
+                horizontalArrangement = Arrangement.spacedBy(18.dp)
             ) {
-                // LEFT SIDE (50%): QR Code Card + Receiver Status & Latest File
-                LeftColumnReceiver(
+                // LEFT COLUMN (45%): TRANSFER CHANNELS (PHONE QR & LAPTOP WI-FI)
+                LeftTransferChannelsSection(
                     modifier = Modifier
-                        .weight(1f)
+                        .weight(0.9f)
                         .fillMaxHeight(),
                     baseUrl = baseUrl,
                     cleanHost = cleanHost,
                     isConnected = isConnectedToHub,
                     connectionStatus = connectionStatusText,
-                    latestItem = tvTransfers.firstOrNull(),
-                    onEditIp = { showIpDialog = true },
+                    onEditIp = { showIpDialog = true }
+                )
+
+                // RIGHT COLUMN (55%): LATEST RECEIVED FILE & REMOTE VERIFICATION
+                RightReceivedHeroSection(
+                    modifier = Modifier
+                        .weight(1.1f)
+                        .fillMaxHeight(),
+                    latestItem = deduplicatedTransfers.firstOrNull(),
                     onItemClick = { selectedItemForDetail = it },
+                    onReDownload = { item ->
+                        coroutineScope.launch {
+                            Toast.makeText(context, "Re-downloading ${item.fileName}...", Toast.LENGTH_SHORT).show()
+                            val success = fileManager.downloadOrRedownload(item.downloadUrl, item.fileName)
+                            storageStatus = fileManager.getStorageStatusAndAutoClean()
+                            if (success) {
+                                Toast.makeText(context, "Re-downloaded ${item.fileName} successfully!", Toast.LENGTH_SHORT).show()
+                            } else {
+                                Toast.makeText(context, "Re-download failed. Check host connection.", Toast.LENGTH_SHORT).show()
+                            }
+                        }
+                    },
                     onCopy = { text ->
                         clipboardManager.setText(AnnotatedString(text))
                         Toast.makeText(context, "Copied to clipboard", Toast.LENGTH_SHORT).show()
                     },
                     onSimulateLaptopSend = {
                         coroutineScope.launch {
-                            val sampleName = "project_specs_v2.zip"
+                            val sampleName = "project_specs.pdf"
+                            val dlUrl = "$baseUrl/download/$sampleName"
                             repository.pushTransfer(
-                                title = "Project Deliverables & Specs",
-                                content = "Exported design tokens, UI specifications, and deployment bundle.",
+                                title = sampleName,
+                                content = "Design deliverables, vector tokens, and deployment bundle.",
                                 type = "FILE",
                                 fileName = sampleName,
-                                fileSize = "4.2 MB",
-                                devices = listOf("Android TV"),
+                                fileSize = "2.8 MB",
+                                devices = listOf("All 3 Devices"),
                                 pinVerified = true,
                                 sender = "laptop",
                                 target = "tv",
-                                downloadUrl = "$baseUrl/download/$sampleName"
+                                downloadUrl = dlUrl
                             )
+                            fileManager.downloadOrRedownload(dlUrl, sampleName)
+                            storageStatus = fileManager.getStorageStatusAndAutoClean()
                         }
                     },
-                    onSimulateMobileSend = {
+                    onSimulatePhoneSend = {
                         coroutineScope.launch {
-                            val sampleName = "camera_shot_4k.jpg"
+                            val sampleName = "camera_snapshot.jpg"
+                            val dlUrl = "$baseUrl/download/$sampleName"
                             repository.pushTransfer(
-                                title = "Mobile Camera Capture",
-                                content = "High-definition camera photo sent to Android TV screen.",
+                                title = sampleName,
+                                content = "High resolution photo captured on Phone sent to TV.",
                                 type = "IMAGE",
                                 fileName = sampleName,
-                                fileSize = "2.8 MB",
-                                devices = listOf("Android TV"),
+                                fileSize = "3.2 MB",
+                                devices = listOf("TV", "Phone"),
                                 pinVerified = true,
-                                sender = "mobile",
+                                sender = "phone",
                                 target = "tv",
-                                downloadUrl = "$baseUrl/download/$sampleName"
+                                downloadUrl = dlUrl
                             )
+                            fileManager.downloadOrRedownload(dlUrl, sampleName)
+                            storageStatus = fileManager.getStorageStatusAndAutoClean()
                         }
-                    }
-                )
-
-                // RIGHT SIDE (50%): Full "History" List of Received Files
-                RightColumnHistory(
-                    modifier = Modifier
-                        .weight(1f)
-                        .fillMaxHeight(),
-                    transfers = tvTransfers,
-                    onItemClick = { selectedItemForDetail = it },
-                    onCopy = { text ->
-                        clipboardManager.setText(AnnotatedString(text))
-                        Toast.makeText(context, "Copied", Toast.LENGTH_SHORT).show()
                     }
                 )
             }
         }
 
-        // Automatic Top-Right Alert Notification Banner
+        // Notification Banner
         AnimatedVisibility(
             visible = activeNotification != null,
             enter = slideInVertically(initialOffsetY = { -it }) + fadeIn(),
@@ -392,7 +430,7 @@ fun MainAppContent(
                 colors = CardDefaults.cardColors(containerColor = NavyPrimary),
                 elevation = CardDefaults.cardElevation(defaultElevation = 8.dp),
                 modifier = Modifier
-                    .width(420.dp)
+                    .width(400.dp)
                     .border(1.5.dp, ElectricCyan, RoundedCornerShape(14.dp))
                     .clickable { activeNotification = null }
                     .testTag("notification_banner")
@@ -403,7 +441,7 @@ fun MainAppContent(
                 ) {
                     Box(
                         modifier = Modifier
-                            .size(40.dp)
+                            .size(36.dp)
                             .clip(CircleShape)
                             .background(NavySecondary),
                         contentAlignment = Alignment.Center
@@ -412,7 +450,7 @@ fun MainAppContent(
                             imageVector = Icons.Default.NotificationsActive,
                             contentDescription = null,
                             tint = PureWhite,
-                            modifier = Modifier.size(22.dp)
+                            modifier = Modifier.size(20.dp)
                         )
                     }
 
@@ -420,7 +458,7 @@ fun MainAppContent(
 
                     Column(modifier = Modifier.weight(1f)) {
                         Text(
-                            text = "Zero-Click Download Complete",
+                            text = "Auto-Downloaded Successfully",
                             color = ElectricCyan,
                             fontSize = 11.sp,
                             fontWeight = FontWeight.Bold
@@ -437,7 +475,7 @@ fun MainAppContent(
             }
         }
 
-        // Dialog for Changing Host Server IP
+        // Host IP Configuration Dialog (Opened via Pencil icon)
         if (showIpDialog) {
             ServerIpDialog(
                 currentIp = cleanHost,
@@ -454,10 +492,43 @@ fun MainAppContent(
             )
         }
 
-        // LocalSend & Wireless TV Install Guide Dialog
-        if (showInstallGuideDialog) {
-            WirelessInstallGuideDialog(
-                onDismiss = { showInstallGuideDialog = false }
+        // Unified TV Settings & Information Dialog (Houses History, Storage & Info)
+        if (showSettingsDialog) {
+            UnifiedSettingsAndHistoryDialog(
+                cleanHost = cleanHost,
+                storageStatus = storageStatus,
+                transfers = deduplicatedTransfers,
+                onDismiss = { showSettingsDialog = false },
+                onEditIp = {
+                    showSettingsDialog = false
+                    showIpDialog = true
+                },
+                onManualClear = {
+                    coroutineScope.launch {
+                        val count = fileManager.clearAllFiles()
+                        storageStatus = fileManager.getStorageStatusAndAutoClean()
+                        Toast.makeText(context, "Cleared $count cached files", Toast.LENGTH_SHORT).show()
+                    }
+                },
+                onItemClick = { item ->
+                    showSettingsDialog = false
+                    selectedItemForDetail = item
+                },
+                onReDownload = { item ->
+                    coroutineScope.launch {
+                        fileManager.downloadOrRedownload(item.downloadUrl, item.fileName)
+                        storageStatus = fileManager.getStorageStatusAndAutoClean()
+                        Toast.makeText(context, "Re-downloaded ${item.fileName}", Toast.LENGTH_SHORT).show()
+                    }
+                },
+                onDelete = { item ->
+                    coroutineScope.launch {
+                        fileManager.deleteLocalFile(item.fileName)
+                        repository.deleteTransfer(item.id)
+                        storageStatus = fileManager.getStorageStatusAndAutoClean()
+                        Toast.makeText(context, "Removed ${item.title}", Toast.LENGTH_SHORT).show()
+                    }
+                }
             )
         }
 
@@ -467,6 +538,13 @@ fun MainAppContent(
                 item = selectedItemForDetail!!,
                 baseUrl = baseUrl,
                 onDismiss = { selectedItemForDetail = null },
+                onReDownload = { item ->
+                    coroutineScope.launch {
+                        fileManager.downloadOrRedownload(item.downloadUrl, item.fileName)
+                        storageStatus = fileManager.getStorageStatusAndAutoClean()
+                        Toast.makeText(context, "Re-downloaded ${item.fileName}", Toast.LENGTH_SHORT).show()
+                    }
+                },
                 onCopy = { text ->
                     clipboardManager.setText(AnnotatedString(text))
                     Toast.makeText(context, "Copied to Clipboard", Toast.LENGTH_SHORT).show()
@@ -487,15 +565,12 @@ private fun triggerAlert(context: Context) {
     } catch (_: Exception) {}
 }
 
-// ==================== DEDICATED TV HEADER ====================
+// ==================== ULTRA-MINIMALIST TOP HEADER ====================
 @Composable
-private fun DedicatedTvHeader(
-    cleanHost: String,
-    isConnected: Boolean,
-    connectionStatus: String,
+private fun UltraMinimalistHeader(
+    storageStatus: StorageStatus,
     timeString: String,
-    onEditIp: () -> Unit,
-    onOpenInstallGuide: () -> Unit
+    onOpenSettings: () -> Unit
 ) {
     Row(
         modifier = Modifier
@@ -505,12 +580,12 @@ private fun DedicatedTvHeader(
         horizontalArrangement = Arrangement.SpaceBetween,
         verticalAlignment = Alignment.CenterVertically
     ) {
-        // App Title: Navy Logo + Crisp Black "PVT TV"
+        // App Title & Receiver Tag
         Row(verticalAlignment = Alignment.CenterVertically) {
             Box(
                 modifier = Modifier
-                    .size(44.dp)
-                    .clip(RoundedCornerShape(10.dp))
+                    .size(38.dp)
+                    .clip(RoundedCornerShape(8.dp))
                     .background(NavyPrimary),
                 contentAlignment = Alignment.Center
             ) {
@@ -519,137 +594,93 @@ private fun DedicatedTvHeader(
                     color = PureWhite,
                     fontWeight = FontWeight.Black,
                     fontFamily = FontFamily.Monospace,
-                    fontSize = 18.sp
+                    fontSize = 15.sp
                 )
             }
 
-            Spacer(modifier = Modifier.width(14.dp))
+            Spacer(modifier = Modifier.width(10.dp))
 
-            Column {
-                Row(verticalAlignment = Alignment.CenterVertically) {
-                    Text(
-                        text = "PVT TV",
-                        color = CharcoalText,
-                        fontSize = 22.sp,
-                        fontWeight = FontWeight.Black,
-                        letterSpacing = 0.5.sp
-                    )
-                    Spacer(modifier = Modifier.width(10.dp))
-                    Box(
-                        modifier = Modifier
-                            .clip(RoundedCornerShape(6.dp))
-                            .background(NavyPrimary)
-                            .padding(horizontal = 8.dp, vertical = 2.dp)
-                    ) {
-                        Text(
-                            text = "TV RECEIVER",
-                            color = PureWhite,
-                            fontSize = 10.sp,
-                            fontWeight = FontWeight.Bold,
-                            letterSpacing = 0.5.sp
-                        )
-                    }
-                }
-                Text(
-                    text = "One-Way Automatic Transfer Station",
-                    color = SlateSubtext,
-                    fontSize = 11.sp
-                )
-            }
-        }
+            Text(
+                text = "PVT TV",
+                color = CharcoalText,
+                fontSize = 20.sp,
+                fontWeight = FontWeight.Black,
+                letterSpacing = 0.5.sp
+            )
 
-        // Host Hub Indicator
-        Row(
-            verticalAlignment = Alignment.CenterVertically,
-            modifier = Modifier
-                .clip(RoundedCornerShape(12.dp))
-                .background(SlateBackground)
-                .border(1.dp, SlateBorder, RoundedCornerShape(12.dp))
-                .clickable { onEditIp() }
-                .padding(horizontal = 14.dp, vertical = 8.dp)
-                .testTag("server_ip_pill")
-        ) {
+            Spacer(modifier = Modifier.width(8.dp))
+
             Box(
                 modifier = Modifier
-                    .size(10.dp)
-                    .clip(CircleShape)
-                    .background(if (isConnected) AccentTeal else SlateMuted)
-            )
-
-            Spacer(modifier = Modifier.width(10.dp))
-
-            Column {
+                    .clip(RoundedCornerShape(4.dp))
+                    .background(NavyPrimary)
+                    .padding(horizontal = 6.dp, vertical = 2.dp)
+            ) {
                 Text(
-                    text = "http://$cleanHost",
-                    color = CharcoalText,
-                    fontSize = 12.sp,
-                    fontFamily = FontFamily.Monospace,
+                    text = "RECEIVER",
+                    color = PureWhite,
+                    fontSize = 9.sp,
                     fontWeight = FontWeight.Bold
                 )
-                Text(
-                    text = "Status: $connectionStatus • Tap to Edit Host",
-                    color = if (isConnected) AccentTeal else SlateSubtext,
-                    fontSize = 10.sp
-                )
             }
-
-            Spacer(modifier = Modifier.width(10.dp))
-
-            Icon(
-                imageVector = Icons.Default.Edit,
-                contentDescription = "Edit IP",
-                tint = NavyPrimary,
-                modifier = Modifier.size(16.dp)
-            )
         }
 
-        // Right side: LocalSend Guide, Wi-Fi, Bluetooth & Clock
+        // Right side: Real TV Storage Badge + Settings Icon + Clock
         Row(verticalAlignment = Alignment.CenterVertically) {
+            // Real TV Storage badge
             Row(
                 verticalAlignment = Alignment.CenterVertically,
                 modifier = Modifier
                     .clip(RoundedCornerShape(8.dp))
                     .background(SlateBackground)
                     .border(1.dp, SlateBorder, RoundedCornerShape(8.dp))
-                    .clickable { onOpenInstallGuide() }
+                    .clickable { onOpenSettings() }
+                    .focusable()
                     .padding(horizontal = 10.dp, vertical = 6.dp)
-                    .testTag("tv_install_guide_button")
+                    .testTag("tv_storage_header_badge")
             ) {
                 Icon(
-                    imageVector = Icons.Default.Info,
-                    contentDescription = "Install Guide",
+                    imageVector = Icons.Default.Storage,
+                    contentDescription = null,
                     tint = NavyPrimary,
-                    modifier = Modifier.size(15.dp)
+                    modifier = Modifier.size(14.dp)
                 )
-                Spacer(modifier = Modifier.width(5.dp))
+                Spacer(modifier = Modifier.width(6.dp))
                 Text(
-                    text = "Install Guide",
-                    color = NavyPrimary,
+                    text = storageStatus.headerBadgeText,
+                    color = CharcoalText,
                     fontSize = 11.sp,
-                    fontWeight = FontWeight.Bold
+                    fontWeight = FontWeight.SemiBold
                 )
             }
 
-            Spacer(modifier = Modifier.width(12.dp))
+            Spacer(modifier = Modifier.width(10.dp))
 
-            Icon(
-                imageVector = Icons.Default.Wifi,
-                contentDescription = null,
-                tint = NavyPrimary,
-                modifier = Modifier.size(18.dp)
-            )
-            Spacer(modifier = Modifier.width(8.dp))
-            Icon(
-                imageVector = Icons.Default.Bluetooth,
-                contentDescription = null,
-                tint = NavyPrimary,
-                modifier = Modifier.size(18.dp)
-            )
+            // Settings Icon (Houses History, Storage & Configuration)
+            IconButton(
+                onClick = onOpenSettings,
+                modifier = Modifier
+                    .size(36.dp)
+                    .clip(RoundedCornerShape(8.dp))
+                    .background(SlateBackground)
+                    .border(1.dp, SlateBorder, RoundedCornerShape(8.dp))
+                    .focusable()
+                    .testTag("settings_button")
+            ) {
+                Icon(
+                    imageVector = Icons.Default.Settings,
+                    contentDescription = "Settings",
+                    tint = NavyPrimary,
+                    modifier = Modifier.size(18.dp)
+                )
+            }
+
             Spacer(modifier = Modifier.width(14.dp))
+
             Text(
                 text = timeString,
                 color = CharcoalText,
-                fontSize = 15.sp,
+                fontSize = 14.sp,
                 fontWeight = FontWeight.Bold,
                 fontFamily = FontFamily.Monospace
             )
@@ -657,23 +688,17 @@ private fun DedicatedTvHeader(
     }
 }
 
-// ==================== LEFT COLUMN (50%): QR Card + Receiver Status & Latest File ====================
+// ==================== LEFT COLUMN (45%): PHONE QR & LAPTOP WI-FI ====================
 @Composable
-private fun LeftColumnReceiver(
+private fun LeftTransferChannelsSection(
     modifier: Modifier = Modifier,
     baseUrl: String,
     cleanHost: String,
     isConnected: Boolean,
     connectionStatus: String,
-    latestItem: TransferItem?,
-    onEditIp: () -> Unit,
-    onItemClick: (TransferItem) -> Unit,
-    onCopy: (String) -> Unit,
-    onSimulateLaptopSend: () -> Unit,
-    onSimulateMobileSend: () -> Unit
+    onEditIp: () -> Unit
 ) {
     val context = LocalContext.current
-    // QR Code URL: https://api.qrserver.com/v1/create-qr-code/?size=250x250&margin=12&data=http%3A%2F%2F192.168.1.2%3A4000
     val encodedBaseUrl = remember(baseUrl) {
         try {
             URLEncoder.encode(baseUrl, "UTF-8")
@@ -687,29 +712,58 @@ private fun LeftColumnReceiver(
         modifier = modifier,
         verticalArrangement = Arrangement.spacedBy(16.dp)
     ) {
-        // TOP 1/4th: PURE WHITE PADDED QR CODE CARD & EDITABLE HOST INPUT
+        // CARD 1: SEND FROM PHONE (SCAN QR)
         Card(
-            shape = RoundedCornerShape(20.dp),
+            shape = RoundedCornerShape(18.dp),
             colors = CardDefaults.cardColors(containerColor = PureWhite),
             modifier = Modifier
                 .fillMaxWidth()
-                .border(1.dp, SlateBorder, RoundedCornerShape(20.dp))
+                .weight(1.3f)
+                .border(1.dp, SlateBorder, RoundedCornerShape(18.dp))
         ) {
-            Row(
+            Column(
                 modifier = Modifier
-                    .fillMaxWidth()
+                    .fillMaxSize()
                     .padding(16.dp),
-                verticalAlignment = Alignment.CenterVertically,
-                horizontalArrangement = Arrangement.spacedBy(16.dp)
+                horizontalAlignment = Alignment.CenterHorizontally,
+                verticalArrangement = Arrangement.SpaceBetween
             ) {
-                // High-Contrast Pure White Padded QR Box (padding 14.dp, border-radius 12.dp)
+                // Header
+                Row(
+                    modifier = Modifier.fillMaxWidth(),
+                    verticalAlignment = Alignment.CenterVertically
+                ) {
+                    Icon(
+                        imageVector = Icons.Default.Smartphone,
+                        contentDescription = null,
+                        tint = NavyPrimary,
+                        modifier = Modifier.size(18.dp)
+                    )
+                    Spacer(modifier = Modifier.width(8.dp))
+                    Text(
+                        text = "Send from Phone",
+                        color = CharcoalText,
+                        fontSize = 16.sp,
+                        fontWeight = FontWeight.Black
+                    )
+                    Spacer(modifier = Modifier.weight(1f))
+                    Box(
+                        modifier = Modifier
+                            .clip(RoundedCornerShape(4.dp))
+                            .background(NavySecondary)
+                            .padding(horizontal = 6.dp, vertical = 2.dp)
+                    ) {
+                        Text("Scan QR", color = PureWhite, fontSize = 9.sp, fontWeight = FontWeight.Bold)
+                    }
+                }
+
+                // High-Contrast Pure White QR Code
                 Box(
                     modifier = Modifier
                         .clip(RoundedCornerShape(12.dp))
                         .background(PureWhite)
                         .border(1.5.dp, CharcoalText, RoundedCornerShape(12.dp))
-                        .padding(14.dp)
-                        .testTag("qr_code_container"),
+                        .padding(10.dp),
                     contentAlignment = Alignment.Center
                 ) {
                     SubcomposeAsyncImage(
@@ -717,452 +771,586 @@ private fun LeftColumnReceiver(
                             .data(qrApiUrl)
                             .crossfade(true)
                             .build(),
-                        contentDescription = "Scannable QR Code for $baseUrl",
+                        contentDescription = "QR Code for $baseUrl",
                         contentScale = ContentScale.Fit,
-                        modifier = Modifier
-                            .size(118.dp)
-                            .testTag("qr_code_image"),
+                        modifier = Modifier.size(135.dp),
                         loading = {
-                            Box(
-                                modifier = Modifier
-                                    .size(118.dp)
-                                    .background(PureWhite),
-                                contentAlignment = Alignment.Center
-                            ) {
-                                CircularProgressIndicator(
-                                    color = NavyPrimary,
-                                    strokeWidth = 2.5.dp,
-                                    modifier = Modifier.size(28.dp)
-                                )
+                            Box(modifier = Modifier.size(135.dp), contentAlignment = Alignment.Center) {
+                                CircularProgressIndicator(color = NavyPrimary, strokeWidth = 2.dp, modifier = Modifier.size(28.dp))
                             }
                         },
                         error = {
-                            Box(
-                                modifier = Modifier
-                                    .size(118.dp)
-                                    .background(PureWhite)
-                                    .border(1.dp, SlateBorder, RoundedCornerShape(8.dp)),
-                                contentAlignment = Alignment.Center
-                            ) {
-                                Icon(
-                                    imageVector = Icons.Default.QrCode,
-                                    contentDescription = null,
-                                    tint = CharcoalText,
-                                    modifier = Modifier.size(56.dp)
-                                )
+                            Box(modifier = Modifier.size(135.dp), contentAlignment = Alignment.Center) {
+                                Icon(Icons.Default.QrCode, contentDescription = null, tint = CharcoalText, modifier = Modifier.size(54.dp))
                             }
                         }
                     )
                 }
 
-                // QR Meta & Editable Host IP Input
-                Column(modifier = Modifier.weight(1f)) {
-                    Row(verticalAlignment = Alignment.CenterVertically) {
-                        Icon(
-                            imageVector = Icons.Default.QrCodeScanner,
-                            contentDescription = null,
-                            tint = NavyPrimary,
-                            modifier = Modifier.size(16.dp)
-                        )
-                        Spacer(modifier = Modifier.width(6.dp))
-                        Text(
-                            text = "Scan to Connect",
-                            color = CharcoalText,
-                            fontSize = 15.sp,
-                            fontWeight = FontWeight.Black
-                        )
-                    }
-
-                    Spacer(modifier = Modifier.height(2.dp))
-
-                    Text(
-                        text = "Scan from phone to transfer files directly to TV",
-                        color = SlateSubtext,
-                        fontSize = 11.sp
-                    )
-
-                    Spacer(modifier = Modifier.height(8.dp))
-
-                    // Host IP Row / Editor
-                    Row(
-                        verticalAlignment = Alignment.CenterVertically,
-                        modifier = Modifier
-                            .clip(RoundedCornerShape(8.dp))
-                            .background(SlateBackground)
-                            .border(1.dp, SlateBorder, RoundedCornerShape(8.dp))
-                            .clickable { onEditIp() }
-                            .padding(horizontal = 10.dp, vertical = 6.dp)
-                            .testTag("qr_host_ip_pill")
-                    ) {
-                        Column(modifier = Modifier.weight(1f)) {
-                            Text(
-                                text = "Host: $cleanHost",
-                                color = CharcoalText,
-                                fontSize = 11.sp,
-                                fontFamily = FontFamily.Monospace,
-                                fontWeight = FontWeight.Bold
-                            )
-                            Text(
-                                text = "Status: $connectionStatus",
-                                color = if (isConnected) AccentTeal else SlateSubtext,
-                                fontSize = 10.sp
-                            )
-                        }
-                        Icon(
-                            imageVector = Icons.Default.Edit,
-                            contentDescription = "Edit Host",
-                            tint = NavyPrimary,
-                            modifier = Modifier.size(14.dp)
-                        )
-                    }
-                }
+                Text(
+                    text = "Point camera to send files directly over local Wi-Fi",
+                    color = SlateSubtext,
+                    fontSize = 11.sp,
+                    textAlign = TextAlign.Center
+                )
             }
         }
 
-        // BOTTOM: RECEIVER STATUS & ACTIVE INCOMING FILE CARD
+        // CARD 2: SEND FROM LAPTOP (WI-FI HUB + PENCIL EDIT)
         Card(
-            shape = RoundedCornerShape(20.dp),
+            shape = RoundedCornerShape(18.dp),
             colors = CardDefaults.cardColors(containerColor = PureWhite),
             modifier = Modifier
                 .fillMaxWidth()
-                .weight(1f)
-                .border(1.dp, SlateBorder, RoundedCornerShape(20.dp))
+                .weight(0.7f)
+                .border(1.dp, SlateBorder, RoundedCornerShape(18.dp))
         ) {
             Column(
                 modifier = Modifier
                     .fillMaxSize()
-                    .padding(18.dp),
+                    .padding(16.dp),
                 verticalArrangement = Arrangement.SpaceBetween
             ) {
-                // Top: Status Header
-                Column {
+                Row(
+                    modifier = Modifier.fillMaxWidth(),
+                    verticalAlignment = Alignment.CenterVertically
+                ) {
+                    Icon(
+                        imageVector = Icons.Default.Laptop,
+                        contentDescription = null,
+                        tint = NavyPrimary,
+                        modifier = Modifier.size(18.dp)
+                    )
+                    Spacer(modifier = Modifier.width(8.dp))
+                    Text(
+                        text = "Send from Laptop",
+                        color = CharcoalText,
+                        fontSize = 15.sp,
+                        fontWeight = FontWeight.Black
+                    )
+                    Spacer(modifier = Modifier.weight(1f))
                     Row(verticalAlignment = Alignment.CenterVertically) {
                         Box(
                             modifier = Modifier
-                                .size(9.dp)
+                                .size(7.dp)
                                 .clip(CircleShape)
-                                .background(AccentTeal)
+                                .background(if (isConnected) AccentTeal else SlateMuted)
                         )
-                        Spacer(modifier = Modifier.width(8.dp))
+                        Spacer(modifier = Modifier.width(4.dp))
                         Text(
-                            text = "RECEIVE MODE ONLY",
-                            color = NavyPrimary,
-                            fontWeight = FontWeight.Black,
-                            fontSize = 11.sp,
-                            letterSpacing = 1.sp
+                            text = if (isConnected) "Connected" else "Standby",
+                            color = if (isConnected) AccentTeal else SlateSubtext,
+                            fontSize = 10.sp,
+                            fontWeight = FontWeight.SemiBold
                         )
                     }
+                }
 
-                    Spacer(modifier = Modifier.height(4.dp))
+                Text(
+                    text = "Open this link in laptop browser to upload files to TV:",
+                    color = SlateSubtext,
+                    fontSize = 11.sp
+                )
 
+                // Host IP Selection with Pencil Icon (Clickable/Focusable)
+                Row(
+                    verticalAlignment = Alignment.CenterVertically,
+                    modifier = Modifier
+                        .fillMaxWidth()
+                        .clip(RoundedCornerShape(8.dp))
+                        .background(SlateBackground)
+                        .border(1.dp, SlateBorder, RoundedCornerShape(8.dp))
+                        .clickable { onEditIp() }
+                        .focusable()
+                        .padding(horizontal = 12.dp, vertical = 8.dp)
+                        .testTag("host_ip_pencil_button")
+                ) {
                     Text(
-                        text = "Waiting for files from Laptop or Mobile...",
+                        text = "http://$cleanHost",
                         color = CharcoalText,
-                        fontSize = 17.sp,
-                        fontWeight = FontWeight.Black
+                        fontSize = 12.sp,
+                        fontFamily = FontFamily.Monospace,
+                        fontWeight = FontWeight.Bold,
+                        modifier = Modifier.weight(1f)
                     )
 
-                    Spacer(modifier = Modifier.height(2.dp))
-
-                    Text(
-                        text = "Transfers to 'TV' will be auto-downloaded instantly without remote clicks.",
-                        color = SlateSubtext,
-                        fontSize = 11.sp
+                    Icon(
+                        imageVector = Icons.Default.Edit,
+                        contentDescription = "Edit Host IP",
+                        tint = NavyPrimary,
+                        modifier = Modifier.size(15.dp)
                     )
-                }
-
-                // Middle: Latest / Active Incoming File Card
-                Column {
-                    Text(
-                        text = "Received File",
-                        fontWeight = FontWeight.Black,
-                        fontSize = 15.sp,
-                        color = CharcoalText
-                    )
-
-                    Spacer(modifier = Modifier.height(8.dp))
-
-                    if (latestItem != null) {
-                        Card(
-                            shape = RoundedCornerShape(14.dp),
-                            colors = CardDefaults.cardColors(containerColor = SlateBackground),
-                            modifier = Modifier
-                                .fillMaxWidth()
-                                .border(1.dp, SlateBorder, RoundedCornerShape(14.dp))
-                                .clickable { onItemClick(latestItem) }
-                        ) {
-                            Column(modifier = Modifier.padding(14.dp)) {
-                                Row(
-                                    modifier = Modifier.fillMaxWidth(),
-                                    horizontalArrangement = Arrangement.SpaceBetween,
-                                    verticalAlignment = Alignment.CenterVertically
-                                ) {
-                                    Row(verticalAlignment = Alignment.CenterVertically) {
-                                        Box(
-                                            modifier = Modifier
-                                                .size(38.dp)
-                                                .clip(RoundedCornerShape(8.dp))
-                                                .background(NavyPrimary),
-                                            contentAlignment = Alignment.Center
-                                        ) {
-                                            Icon(
-                                                imageVector = when (latestItem.type) {
-                                                    "CODE" -> Icons.Default.Code
-                                                    "IMAGE" -> Icons.Default.Image
-                                                    else -> Icons.Default.FolderZip
-                                                },
-                                                contentDescription = null,
-                                                tint = PureWhite,
-                                                modifier = Modifier.size(18.dp)
-                                            )
-                                        }
-                                        Spacer(modifier = Modifier.width(10.dp))
-                                        Column {
-                                            Text(
-                                                text = latestItem.title,
-                                                color = CharcoalText,
-                                                fontWeight = FontWeight.Bold,
-                                                fontSize = 13.sp,
-                                                maxLines = 1
-                                            )
-                                            Row(verticalAlignment = Alignment.CenterVertically) {
-                                                Text(
-                                                    text = "From ${latestItem.sender.replaceFirstChar { it.uppercase() }}",
-                                                    color = NavyPrimary,
-                                                    fontWeight = FontWeight.Bold,
-                                                    fontSize = 11.sp
-                                                )
-                                                if (latestItem.fileSize.isNotBlank()) {
-                                                    Spacer(modifier = Modifier.width(6.dp))
-                                                    Text(
-                                                        text = "• ${latestItem.fileSize}",
-                                                        color = SlateSubtext,
-                                                        fontSize = 10.sp
-                                                    )
-                                                }
-                                            }
-                                        }
-                                    }
-
-                                    Box(
-                                        modifier = Modifier
-                                            .clip(RoundedCornerShape(6.dp))
-                                            .background(NavyPrimary)
-                                            .padding(horizontal = 8.dp, vertical = 3.dp)
-                                    ) {
-                                        Row(verticalAlignment = Alignment.CenterVertically) {
-                                            Icon(
-                                                imageVector = Icons.Default.CheckCircle,
-                                                contentDescription = null,
-                                                tint = PureWhite,
-                                                modifier = Modifier.size(10.dp)
-                                            )
-                                            Spacer(modifier = Modifier.width(3.dp))
-                                            Text(
-                                                text = "Auto-Downloaded",
-                                                color = PureWhite,
-                                                fontSize = 9.sp,
-                                                fontWeight = FontWeight.Bold
-                                            )
-                                        }
-                                    }
-                                }
-
-                                Spacer(modifier = Modifier.height(8.dp))
-
-                                Text(
-                                    text = latestItem.content,
-                                    color = CharcoalText,
-                                    fontSize = 11.sp,
-                                    maxLines = 2,
-                                    fontFamily = if (latestItem.type == "CODE") FontFamily.Monospace else FontFamily.Default
-                                )
-
-                                Spacer(modifier = Modifier.height(6.dp))
-
-                                val dlUrl = if (latestItem.downloadUrl.isNotBlank()) {
-                                    latestItem.downloadUrl
-                                } else {
-                                    "$baseUrl/download/${latestItem.fileName.ifBlank { "file" }}"
-                                }
-                                Text(
-                                    text = "Source: $dlUrl",
-                                    color = SlateSubtext,
-                                    fontSize = 10.sp,
-                                    fontFamily = FontFamily.Monospace,
-                                    maxLines = 1
-                                )
-
-                                Spacer(modifier = Modifier.height(8.dp))
-
-                                Row(
-                                    modifier = Modifier.fillMaxWidth(),
-                                    horizontalArrangement = Arrangement.End
-                                ) {
-                                    OutlinedButton(
-                                        onClick = { onCopy(latestItem.content) },
-                                        shape = RoundedCornerShape(8.dp),
-                                        colors = ButtonDefaults.outlinedButtonColors(contentColor = NavyPrimary)
-                                    ) {
-                                        Icon(Icons.Default.ContentCopy, contentDescription = null, modifier = Modifier.size(12.dp))
-                                        Spacer(modifier = Modifier.width(4.dp))
-                                        Text("Copy Text", fontSize = 10.sp)
-                                    }
-                                }
-                            }
-                        }
-                    } else {
-                        Box(
-                            modifier = Modifier
-                                .fillMaxWidth()
-                                .height(95.dp)
-                                .clip(RoundedCornerShape(12.dp))
-                                .background(SlateBackground)
-                                .border(1.dp, SlateBorder, RoundedCornerShape(12.dp)),
-                            contentAlignment = Alignment.Center
-                        ) {
-                            Column(horizontalAlignment = Alignment.CenterHorizontally) {
-                                Icon(
-                                    imageVector = Icons.Default.Download,
-                                    contentDescription = null,
-                                    tint = SlateSubtext,
-                                    modifier = Modifier.size(22.dp)
-                                )
-                                Spacer(modifier = Modifier.height(4.dp))
-                                Text(
-                                    text = "Waiting for incoming files...",
-                                    color = SlateSubtext,
-                                    fontSize = 12.sp
-                                )
-                            }
-                        }
-                    }
-                }
-
-                // Bottom: Channel Info & One-Touch TV Test Simulator Buttons
-                Column {
-                    Row(
-                        modifier = Modifier
-                            .fillMaxWidth()
-                            .clip(RoundedCornerShape(8.dp))
-                            .background(SlateBackground)
-                            .padding(8.dp),
-                        horizontalArrangement = Arrangement.SpaceAround
-                    ) {
-                        Text("• Quick Share", color = CharcoalText, fontSize = 10.sp, fontWeight = FontWeight.SemiBold)
-                        Text("• LocalSend: 4000", color = CharcoalText, fontSize = 10.sp, fontWeight = FontWeight.SemiBold)
-                        Text("• Bluetooth OBEX", color = CharcoalText, fontSize = 10.sp, fontWeight = FontWeight.SemiBold)
-                    }
-
-                    Spacer(modifier = Modifier.height(8.dp))
-
-                    Row(
-                        modifier = Modifier.fillMaxWidth(),
-                        horizontalArrangement = Arrangement.spacedBy(8.dp)
-                    ) {
-                        OutlinedButton(
-                            onClick = onSimulateLaptopSend,
-                            modifier = Modifier
-                                .weight(1f)
-                                .testTag("simulate_laptop_send"),
-                            shape = RoundedCornerShape(8.dp),
-                            colors = ButtonDefaults.outlinedButtonColors(contentColor = NavyPrimary)
-                        ) {
-                            Icon(Icons.Default.Laptop, contentDescription = null, modifier = Modifier.size(12.dp))
-                            Spacer(modifier = Modifier.width(4.dp))
-                            Text("Simulate Laptop", fontSize = 10.sp)
-                        }
-
-                        OutlinedButton(
-                            onClick = onSimulateMobileSend,
-                            modifier = Modifier
-                                .weight(1f)
-                                .testTag("simulate_mobile_send"),
-                            shape = RoundedCornerShape(8.dp),
-                            colors = ButtonDefaults.outlinedButtonColors(contentColor = NavyPrimary)
-                        ) {
-                            Icon(Icons.Default.Smartphone, contentDescription = null, modifier = Modifier.size(12.dp))
-                            Spacer(modifier = Modifier.width(4.dp))
-                            Text("Simulate Mobile", fontSize = 10.sp)
-                        }
-                    }
                 }
             }
         }
     }
 }
 
-// ==================== RIGHT COLUMN (50%): FULL HISTORY LIST ====================
+// ==================== RIGHT COLUMN (55%): LATEST RECEIVED FILE & ACTIONS ====================
 @Composable
-private fun RightColumnHistory(
+private fun RightReceivedHeroSection(
     modifier: Modifier = Modifier,
-    transfers: List<TransferItem>,
+    latestItem: TransferItem?,
     onItemClick: (TransferItem) -> Unit,
-    onCopy: (String) -> Unit
+    onReDownload: (TransferItem) -> Unit,
+    onCopy: (String) -> Unit,
+    onSimulateLaptopSend: () -> Unit,
+    onSimulatePhoneSend: () -> Unit
 ) {
     Card(
-        shape = RoundedCornerShape(20.dp),
+        shape = RoundedCornerShape(18.dp),
         colors = CardDefaults.cardColors(containerColor = PureWhite),
-        modifier = modifier.border(1.dp, SlateBorder, RoundedCornerShape(20.dp))
+        modifier = modifier.border(1.dp, SlateBorder, RoundedCornerShape(18.dp))
     ) {
         Column(
             modifier = Modifier
                 .fillMaxSize()
-                .padding(20.dp)
+                .padding(20.dp),
+            verticalArrangement = Arrangement.SpaceBetween
         ) {
+            // Header
             Row(
                 modifier = Modifier.fillMaxWidth(),
                 horizontalArrangement = Arrangement.SpaceBetween,
                 verticalAlignment = Alignment.CenterVertically
             ) {
-                Text(
-                    text = "History",
-                    color = CharcoalText,
-                    fontSize = 20.sp,
-                    fontWeight = FontWeight.Black
-                )
+                Row(verticalAlignment = Alignment.CenterVertically) {
+                    Box(
+                        modifier = Modifier
+                            .size(9.dp)
+                            .clip(CircleShape)
+                            .background(AccentTeal)
+                    )
+                    Spacer(modifier = Modifier.width(8.dp))
+                    Text(
+                        text = "RECEIVER ACTIVE",
+                        color = NavyPrimary,
+                        fontWeight = FontWeight.Black,
+                        fontSize = 12.sp,
+                        letterSpacing = 0.5.sp
+                    )
+                }
 
                 Box(
                     modifier = Modifier
-                        .clip(RoundedCornerShape(8.dp))
+                        .clip(RoundedCornerShape(6.dp))
                         .background(NavyPrimary)
-                        .padding(horizontal = 10.dp, vertical = 4.dp)
+                        .padding(horizontal = 8.dp, vertical = 3.dp)
                 ) {
-                    Text(
-                        text = "${transfers.size} Items",
-                        color = PureWhite,
-                        fontSize = 11.sp,
-                        fontWeight = FontWeight.Bold
-                    )
+                    Text("Auto-Download On", color = PureWhite, fontSize = 10.sp, fontWeight = FontWeight.Bold)
                 }
             }
 
-            Spacer(modifier = Modifier.height(14.dp))
+            // Main Received File Content Box
+            if (latestItem != null) {
+                Card(
+                    shape = RoundedCornerShape(14.dp),
+                    colors = CardDefaults.cardColors(containerColor = SlateBackground),
+                    modifier = Modifier
+                        .fillMaxWidth()
+                        .border(1.dp, SlateBorder, RoundedCornerShape(14.dp))
+                        .clickable { onItemClick(latestItem) }
+                        .focusable()
+                ) {
+                    Column(modifier = Modifier.padding(18.dp)) {
+                        Row(
+                            modifier = Modifier.fillMaxWidth(),
+                            verticalAlignment = Alignment.CenterVertically
+                        ) {
+                            Box(
+                                modifier = Modifier
+                                    .size(48.dp)
+                                    .clip(RoundedCornerShape(10.dp))
+                                    .background(NavyPrimary),
+                                contentAlignment = Alignment.Center
+                            ) {
+                                Icon(
+                                    imageVector = getFileTypeIcon(latestItem.fileName, latestItem.type),
+                                    contentDescription = null,
+                                    tint = PureWhite,
+                                    modifier = Modifier.size(24.dp)
+                                )
+                            }
 
-            if (transfers.isEmpty()) {
+                            Spacer(modifier = Modifier.width(14.dp))
+
+                            Column(modifier = Modifier.weight(1f)) {
+                                Text(
+                                    text = latestItem.title,
+                                    color = CharcoalText,
+                                    fontWeight = FontWeight.Bold,
+                                    fontSize = 16.sp,
+                                    maxLines = 1
+                                )
+                                Spacer(modifier = Modifier.height(3.dp))
+                                Row(verticalAlignment = Alignment.CenterVertically) {
+                                    val senderText = if (latestItem.sender.contains("phone", true) || latestItem.sender.contains("mobile", true)) "From Phone" else "From Laptop"
+                                    Box(
+                                        modifier = Modifier
+                                            .clip(RoundedCornerShape(4.dp))
+                                            .background(NavyPrimary)
+                                            .padding(horizontal = 6.dp, vertical = 2.dp)
+                                    ) {
+                                        Text(senderText, color = PureWhite, fontSize = 9.sp, fontWeight = FontWeight.Bold)
+                                    }
+
+                                    Spacer(modifier = Modifier.width(8.dp))
+
+                                    Text(
+                                        text = latestItem.fileSize,
+                                        color = SlateSubtext,
+                                        fontSize = 11.sp,
+                                        fontWeight = FontWeight.SemiBold
+                                    )
+
+                                    Spacer(modifier = Modifier.width(8.dp))
+
+                                    Text(
+                                        text = "• Auto-Downloaded",
+                                        color = AccentTeal,
+                                        fontSize = 11.sp,
+                                        fontWeight = FontWeight.Bold
+                                    )
+                                }
+                            }
+                        }
+
+                        Spacer(modifier = Modifier.height(14.dp))
+
+                        Text(
+                            text = latestItem.content,
+                            color = CharcoalText,
+                            fontSize = 12.sp,
+                            maxLines = 3,
+                            fontFamily = if (latestItem.type == "CODE") FontFamily.Monospace else FontFamily.Default
+                        )
+
+                        Spacer(modifier = Modifier.height(16.dp))
+
+                        // Large D-pad remote buttons
+                        Row(
+                            modifier = Modifier.fillMaxWidth(),
+                            horizontalArrangement = Arrangement.End,
+                            verticalAlignment = Alignment.CenterVertically
+                        ) {
+                            OutlinedButton(
+                                onClick = { onCopy(latestItem.content) },
+                                shape = RoundedCornerShape(8.dp),
+                                colors = ButtonDefaults.outlinedButtonColors(contentColor = NavyPrimary),
+                                modifier = Modifier.focusable()
+                            ) {
+                                Icon(Icons.Default.ContentCopy, contentDescription = null, modifier = Modifier.size(14.dp))
+                                Spacer(modifier = Modifier.width(6.dp))
+                                Text("Copy Content", fontSize = 12.sp)
+                            }
+
+                            Spacer(modifier = Modifier.width(10.dp))
+
+                            Button(
+                                onClick = { onReDownload(latestItem) },
+                                shape = RoundedCornerShape(8.dp),
+                                colors = ButtonDefaults.buttonColors(containerColor = NavyPrimary, contentColor = PureWhite),
+                                modifier = Modifier.focusable()
+                            ) {
+                                Icon(Icons.Default.Download, contentDescription = null, modifier = Modifier.size(14.dp))
+                                Spacer(modifier = Modifier.width(6.dp))
+                                Text("Re-Download", fontSize = 12.sp)
+                            }
+                        }
+                    }
+                }
+            } else {
                 Box(
                     modifier = Modifier
                         .fillMaxWidth()
-                        .weight(1f),
+                        .height(140.dp)
+                        .clip(RoundedCornerShape(14.dp))
+                        .background(SlateBackground)
+                        .border(1.dp, SlateBorder, RoundedCornerShape(14.dp)),
                     contentAlignment = Alignment.Center
                 ) {
-                    Text(
-                        text = "History is empty.",
-                        color = SlateSubtext,
-                        fontSize = 13.sp
-                    )
-                }
-            } else {
-                LazyColumn(
-                    modifier = Modifier.weight(1f),
-                    verticalArrangement = Arrangement.spacedBy(10.dp)
-                ) {
-                    items(transfers, key = { it.id.ifBlank { it.title } }) { item ->
-                        HistoryCard(
-                            item = item,
-                            onClick = { onItemClick(item) },
-                            onCopy = { onCopy(item.content) }
+                    Column(horizontalAlignment = Alignment.CenterHorizontally) {
+                        Icon(
+                            imageVector = Icons.Default.Download,
+                            contentDescription = null,
+                            tint = SlateSubtext,
+                            modifier = Modifier.size(28.dp)
                         )
+                        Spacer(modifier = Modifier.height(6.dp))
+                        Text(
+                            text = "Waiting for files from Phone or Laptop...",
+                            color = SlateSubtext,
+                            fontSize = 13.sp,
+                            fontWeight = FontWeight.SemiBold
+                        )
+                    }
+                }
+            }
+
+            // Remote Test Simulators (Zero-Click Verified)
+            Column {
+                Text(
+                    text = "One-Touch Remote Simulators (Zero-Click Test)",
+                    color = SlateSubtext,
+                    fontSize = 11.sp,
+                    fontWeight = FontWeight.SemiBold
+                )
+                Spacer(modifier = Modifier.height(6.dp))
+                Row(
+                    modifier = Modifier.fillMaxWidth(),
+                    horizontalArrangement = Arrangement.spacedBy(10.dp)
+                ) {
+                    OutlinedButton(
+                        onClick = onSimulatePhoneSend,
+                        modifier = Modifier
+                            .weight(1f)
+                            .focusable()
+                            .testTag("simulate_phone_send"),
+                        shape = RoundedCornerShape(8.dp),
+                        colors = ButtonDefaults.outlinedButtonColors(contentColor = NavyPrimary)
+                    ) {
+                        Icon(Icons.Default.Smartphone, contentDescription = null, modifier = Modifier.size(14.dp))
+                        Spacer(modifier = Modifier.width(6.dp))
+                        Text("Simulate Phone Send", fontSize = 11.sp)
+                    }
+
+                    OutlinedButton(
+                        onClick = onSimulateLaptopSend,
+                        modifier = Modifier
+                            .weight(1f)
+                            .focusable()
+                            .testTag("simulate_laptop_send"),
+                        shape = RoundedCornerShape(8.dp),
+                        colors = ButtonDefaults.outlinedButtonColors(contentColor = NavyPrimary)
+                    ) {
+                        Icon(Icons.Default.Laptop, contentDescription = null, modifier = Modifier.size(14.dp))
+                        Spacer(modifier = Modifier.width(6.dp))
+                        Text("Simulate Laptop Send", fontSize = 11.sp)
+                    }
+                }
+            }
+        }
+    }
+}
+
+// ==================== UNIFIED SETTINGS & HISTORY DIALOG ====================
+// Neatly houses Transfer History, Real TV Storage, and System Info so main TV screen is ultra-clean!
+@Composable
+private fun UnifiedSettingsAndHistoryDialog(
+    cleanHost: String,
+    storageStatus: StorageStatus,
+    transfers: List<TransferItem>,
+    onDismiss: () -> Unit,
+    onEditIp: () -> Unit,
+    onManualClear: () -> Unit,
+    onItemClick: (TransferItem) -> Unit,
+    onReDownload: (TransferItem) -> Unit,
+    onDelete: (TransferItem) -> Unit
+) {
+    var selectedSection by remember { mutableStateOf("History") } // "History" or "Storage & Setup"
+
+    Dialog(onDismissRequest = onDismiss) {
+        Card(
+            shape = RoundedCornerShape(18.dp),
+            colors = CardDefaults.cardColors(containerColor = PureWhite),
+            modifier = Modifier
+                .width(580.dp)
+                .fillMaxHeight(0.85f)
+                .border(1.dp, SlateBorder, RoundedCornerShape(18.dp))
+        ) {
+            Column(
+                modifier = Modifier
+                    .fillMaxSize()
+                    .padding(20.dp)
+            ) {
+                // Header
+                Row(
+                    modifier = Modifier.fillMaxWidth(),
+                    horizontalArrangement = Arrangement.SpaceBetween,
+                    verticalAlignment = Alignment.CenterVertically
+                ) {
+                    Row(verticalAlignment = Alignment.CenterVertically) {
+                        Icon(Icons.Default.Settings, contentDescription = null, tint = NavyPrimary, modifier = Modifier.size(20.dp))
+                        Spacer(modifier = Modifier.width(8.dp))
+                        Text(
+                            text = "TV Settings & History",
+                            color = CharcoalText,
+                            fontSize = 18.sp,
+                            fontWeight = FontWeight.Black
+                        )
+                    }
+
+                    // Section Switcher
+                    Row(
+                        modifier = Modifier
+                            .clip(RoundedCornerShape(8.dp))
+                            .background(SlateBackground)
+                            .border(1.dp, SlateBorder, RoundedCornerShape(8.dp))
+                            .padding(2.dp)
+                    ) {
+                        listOf("History", "Storage & Setup").forEach { tab ->
+                            val isSel = selectedSection == tab
+                            Box(
+                                modifier = Modifier
+                                    .clip(RoundedCornerShape(6.dp))
+                                    .background(if (isSel) NavyPrimary else Color.Transparent)
+                                    .clickable { selectedSection = tab }
+                                    .focusable()
+                                    .padding(horizontal = 10.dp, vertical = 4.dp)
+                            ) {
+                                Text(
+                                    text = tab,
+                                    color = if (isSel) PureWhite else CharcoalText,
+                                    fontSize = 11.sp,
+                                    fontWeight = if (isSel) FontWeight.Bold else FontWeight.Medium
+                                )
+                            }
+                        }
+                    }
+                }
+
+                Spacer(modifier = Modifier.height(14.dp))
+                Divider(color = SlateBorder, thickness = 1.dp)
+                Spacer(modifier = Modifier.height(12.dp))
+
+                if (selectedSection == "History") {
+                    // Full Transfer History list
+                    if (transfers.isEmpty()) {
+                        Box(
+                            modifier = Modifier
+                                .fillMaxWidth()
+                                .weight(1f),
+                            contentAlignment = Alignment.Center
+                        ) {
+                            Text("No received files in history.", color = SlateSubtext, fontSize = 13.sp)
+                        }
+                    } else {
+                        LazyColumn(
+                            modifier = Modifier.weight(1f),
+                            verticalArrangement = Arrangement.spacedBy(8.dp)
+                        ) {
+                            items(transfers, key = { it.id.ifBlank { it.title } }) { item ->
+                                HistoryRowItem(
+                                    item = item,
+                                    onClick = { onItemClick(item) },
+                                    onReDownload = { onReDownload(item) },
+                                    onDelete = { onDelete(item) }
+                                )
+                            }
+                        }
+                    }
+                } else {
+                    // Storage & Setup Section
+                    Column(
+                        modifier = Modifier
+                            .weight(1f)
+                            .verticalScroll(rememberScrollState()),
+                        verticalArrangement = Arrangement.spacedBy(14.dp)
+                    ) {
+                        // Real Storage Box
+                        Text(
+                            text = "Real Android TV Storage",
+                            color = CharcoalText,
+                            fontSize = 13.sp,
+                            fontWeight = FontWeight.Bold
+                        )
+
+                        Card(
+                            shape = RoundedCornerShape(10.dp),
+                            colors = CardDefaults.cardColors(containerColor = SlateBackground),
+                            modifier = Modifier.fillMaxWidth().border(1.dp, SlateBorder, RoundedCornerShape(10.dp))
+                        ) {
+                            Column(modifier = Modifier.padding(12.dp)) {
+                                Row(modifier = Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.SpaceBetween) {
+                                    Text("Total TV Storage:", color = SlateSubtext, fontSize = 11.sp)
+                                    Text(storageStatus.formattedTotal, color = CharcoalText, fontSize = 11.sp, fontWeight = FontWeight.Bold)
+                                }
+                                Spacer(modifier = Modifier.height(4.dp))
+                                Row(modifier = Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.SpaceBetween) {
+                                    Text("Available Free Space:", color = SlateSubtext, fontSize = 11.sp)
+                                    Text(storageStatus.formattedAvailable, color = NavyPrimary, fontSize = 11.sp, fontWeight = FontWeight.Black)
+                                }
+                                Spacer(modifier = Modifier.height(4.dp))
+                                Row(modifier = Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.SpaceBetween) {
+                                    Text("Usage Capacity:", color = SlateSubtext, fontSize = 11.sp)
+                                    Text("${storageStatus.usedPercent}% (Auto-Clean at 90%)", color = CharcoalText, fontSize = 11.sp, fontWeight = FontWeight.Bold)
+                                }
+                            }
+                        }
+
+                        Row(modifier = Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.End) {
+                            OutlinedButton(
+                                onClick = onManualClear,
+                                shape = RoundedCornerShape(6.dp),
+                                colors = ButtonDefaults.outlinedButtonColors(contentColor = NavyPrimary),
+                                modifier = Modifier.focusable()
+                            ) {
+                                Icon(Icons.Default.CleaningServices, contentDescription = null, modifier = Modifier.size(13.dp))
+                                Spacer(modifier = Modifier.width(4.dp))
+                                Text("Clear Cache Now", fontSize = 11.sp)
+                            }
+                        }
+
+                        // Host IP Config
+                        Text(
+                            text = "Host Hub IP Address",
+                            color = CharcoalText,
+                            fontSize = 13.sp,
+                            fontWeight = FontWeight.Bold
+                        )
+
+                        Row(
+                            verticalAlignment = Alignment.CenterVertically,
+                            modifier = Modifier
+                                .fillMaxWidth()
+                                .clip(RoundedCornerShape(8.dp))
+                                .background(SlateBackground)
+                                .border(1.dp, SlateBorder, RoundedCornerShape(8.dp))
+                                .clickable { onEditIp() }
+                                .focusable()
+                                .padding(10.dp)
+                        ) {
+                            Text(
+                                text = "http://$cleanHost",
+                                color = CharcoalText,
+                                fontSize = 12.sp,
+                                fontFamily = FontFamily.Monospace,
+                                fontWeight = FontWeight.Bold,
+                                modifier = Modifier.weight(1f)
+                            )
+                            Icon(Icons.Default.Edit, contentDescription = "Edit", tint = NavyPrimary, modifier = Modifier.size(15.dp))
+                        }
+
+                        // Sideload info
+                        Text(
+                            text = "Wireless Sideload Guide",
+                            color = CharcoalText,
+                            fontSize = 13.sp,
+                            fontWeight = FontWeight.Bold
+                        )
+                        Text(
+                            text = "• Install LocalSend on TV via Google Play or Downloader app.\n" +
+                                   "• Send any APK or files directly to TV over Wi-Fi without USB cables.",
+                            color = SlateSubtext,
+                            fontSize = 11.sp,
+                            lineHeight = 16.sp
+                        )
+                    }
+                }
+
+                Spacer(modifier = Modifier.height(12.dp))
+
+                Row(
+                    modifier = Modifier.fillMaxWidth(),
+                    horizontalArrangement = Arrangement.End
+                ) {
+                    Button(
+                        onClick = onDismiss,
+                        colors = ButtonDefaults.buttonColors(containerColor = NavyPrimary, contentColor = PureWhite),
+                        shape = RoundedCornerShape(6.dp),
+                        modifier = Modifier.focusable()
+                    ) {
+                        Text("Close")
                     }
                 }
             }
@@ -1171,41 +1359,39 @@ private fun RightColumnHistory(
 }
 
 @Composable
-private fun HistoryCard(
+private fun HistoryRowItem(
     item: TransferItem,
     onClick: () -> Unit,
-    onCopy: () -> Unit
+    onReDownload: () -> Unit,
+    onDelete: () -> Unit
 ) {
     Card(
-        shape = RoundedCornerShape(14.dp),
+        shape = RoundedCornerShape(10.dp),
         colors = CardDefaults.cardColors(containerColor = SlateBackground),
         modifier = Modifier
             .fillMaxWidth()
-            .border(1.dp, SlateBorder, RoundedCornerShape(14.dp))
+            .border(1.dp, SlateBorder, RoundedCornerShape(10.dp))
             .clickable { onClick() }
+            .focusable()
     ) {
         Row(
             modifier = Modifier
                 .fillMaxWidth()
-                .padding(12.dp),
+                .padding(10.dp),
             verticalAlignment = Alignment.CenterVertically
         ) {
             Box(
                 modifier = Modifier
-                    .size(38.dp)
-                    .clip(RoundedCornerShape(8.dp))
+                    .size(34.dp)
+                    .clip(RoundedCornerShape(6.dp))
                     .background(NavyPrimary),
                 contentAlignment = Alignment.Center
             ) {
                 Icon(
-                    imageVector = when (item.type) {
-                        "CODE" -> Icons.Default.Code
-                        "IMAGE" -> Icons.Default.Image
-                        else -> Icons.Default.FolderZip
-                    },
+                    imageVector = getFileTypeIcon(item.fileName, item.type),
                     contentDescription = null,
                     tint = PureWhite,
-                    modifier = Modifier.size(18.dp)
+                    modifier = Modifier.size(16.dp)
                 )
             }
 
@@ -1216,54 +1402,52 @@ private fun HistoryCard(
                     text = item.title,
                     color = CharcoalText,
                     fontWeight = FontWeight.Bold,
-                    fontSize = 13.sp,
+                    fontSize = 12.sp,
                     maxLines = 1
                 )
                 Spacer(modifier = Modifier.height(2.dp))
-                Text(
-                    text = item.content,
-                    color = SlateSubtext,
-                    fontSize = 11.sp,
-                    maxLines = 1,
-                    fontFamily = if (item.type == "CODE") FontFamily.Monospace else FontFamily.Default
-                )
-                Spacer(modifier = Modifier.height(4.dp))
                 Row(verticalAlignment = Alignment.CenterVertically) {
+                    val sText = if (item.sender.contains("phone", true) || item.sender.contains("mobile", true)) "Phone" else "Laptop"
                     Text(
-                        text = "From: ${item.sender.replaceFirstChar { it.uppercase() }}",
+                        text = "From $sText",
                         color = NavyPrimary,
                         fontSize = 10.sp,
                         fontWeight = FontWeight.Bold
                     )
                     Spacer(modifier = Modifier.width(6.dp))
                     Text(
-                        text = "To: TV",
+                        text = "• ${item.fileSize}",
                         color = SlateSubtext,
                         fontSize = 10.sp
                     )
-                    if (item.fileSize.isNotBlank()) {
-                        Spacer(modifier = Modifier.width(6.dp))
-                        Text(
-                            text = "• ${item.fileSize}",
-                            color = SlateMuted,
-                            fontSize = 10.sp
-                        )
-                    }
                 }
             }
 
             IconButton(
-                onClick = onCopy,
-                modifier = Modifier.size(30.dp)
+                onClick = onReDownload,
+                modifier = Modifier.size(30.dp).focusable()
             ) {
-                Icon(
-                    imageVector = Icons.Default.ContentCopy,
-                    contentDescription = "Copy",
-                    tint = NavyPrimary,
-                    modifier = Modifier.size(15.dp)
-                )
+                Icon(Icons.Default.Download, contentDescription = "Re-download", tint = NavyPrimary, modifier = Modifier.size(15.dp))
+            }
+
+            IconButton(
+                onClick = onDelete,
+                modifier = Modifier.size(30.dp).focusable()
+            ) {
+                Icon(Icons.Default.Delete, contentDescription = "Delete", tint = SlateSubtext, modifier = Modifier.size(15.dp))
             }
         }
+    }
+}
+
+private fun getFileTypeIcon(fileName: String, type: String): ImageVector {
+    val lower = fileName.lowercase()
+    return when {
+        lower.endsWith(".pdf") -> Icons.Default.PictureAsPdf
+        lower.endsWith(".jpg") || lower.endsWith(".png") || lower.endsWith(".jpeg") || type == "IMAGE" -> Icons.Default.Image
+        lower.endsWith(".zip") || lower.endsWith(".tar") || lower.endsWith(".gz") -> Icons.Default.FolderZip
+        lower.endsWith(".kt") || lower.endsWith(".py") || lower.endsWith(".js") || lower.endsWith(".json") || type == "CODE" -> Icons.Default.Code
+        else -> Icons.Default.Folder
     }
 }
 
@@ -1273,17 +1457,18 @@ private fun PayloadDetailDialog(
     item: TransferItem,
     baseUrl: String,
     onDismiss: () -> Unit,
+    onReDownload: (TransferItem) -> Unit,
     onCopy: (String) -> Unit
 ) {
     Dialog(onDismissRequest = onDismiss) {
         Card(
-            shape = RoundedCornerShape(18.dp),
+            shape = RoundedCornerShape(16.dp),
             colors = CardDefaults.cardColors(containerColor = PureWhite),
             modifier = Modifier
-                .fillMaxWidth(0.9f)
-                .border(1.dp, SlateBorder, RoundedCornerShape(18.dp))
+                .width(480.dp)
+                .border(1.dp, SlateBorder, RoundedCornerShape(16.dp))
         ) {
-            Column(modifier = Modifier.padding(22.dp)) {
+            Column(modifier = Modifier.padding(20.dp)) {
                 Row(
                     modifier = Modifier.fillMaxWidth(),
                     horizontalArrangement = Arrangement.SpaceBetween,
@@ -1293,7 +1478,7 @@ private fun PayloadDetailDialog(
                         text = item.title,
                         color = CharcoalText,
                         fontWeight = FontWeight.Bold,
-                        fontSize = 17.sp,
+                        fontSize = 16.sp,
                         maxLines = 1
                     )
                     Box(
@@ -1308,49 +1493,46 @@ private fun PayloadDetailDialog(
 
                 Spacer(modifier = Modifier.height(8.dp))
 
+                val senderName = if (item.sender.contains("phone", true) || item.sender.contains("mobile", true)) "PHONE" else "LAPTOP"
                 Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
-                    Text("From: ${item.sender.uppercase()}", color = NavyPrimary, fontSize = 11.sp, fontWeight = FontWeight.Bold)
-                    Text("Target: TV", color = SlateSubtext, fontSize = 11.sp)
+                    Text("From: $senderName", color = NavyPrimary, fontSize = 11.sp, fontWeight = FontWeight.Bold)
+                    Text("• Target: TV", color = SlateSubtext, fontSize = 11.sp)
                     if (item.fileSize.isNotBlank()) {
-                        Text("Size: ${item.fileSize}", color = SlateMuted, fontSize = 11.sp)
+                        Text("• ${item.fileSize}", color = SlateMuted, fontSize = 11.sp)
                     }
                 }
 
-                Spacer(modifier = Modifier.height(8.dp))
+                Spacer(modifier = Modifier.height(6.dp))
 
-                val dlUrl = if (item.downloadUrl.isNotBlank()) {
-                    item.downloadUrl
-                } else {
-                    "$baseUrl/download/${item.fileName.ifBlank { "file" }}"
-                }
+                val dlUrl = if (item.downloadUrl.isNotBlank()) item.downloadUrl else "$baseUrl/download/${item.fileName.ifBlank { "file" }}"
                 Text(
-                    text = "Download URL: $dlUrl",
+                    text = "URL: $dlUrl",
                     color = SlateSubtext,
                     fontSize = 10.sp,
                     fontFamily = FontFamily.Monospace
                 )
 
-                Spacer(modifier = Modifier.height(12.dp))
+                Spacer(modifier = Modifier.height(10.dp))
 
                 Box(
                     modifier = Modifier
                         .fillMaxWidth()
-                        .height(180.dp)
-                        .clip(RoundedCornerShape(10.dp))
+                        .height(140.dp)
+                        .clip(RoundedCornerShape(8.dp))
                         .background(SlateBackground)
-                        .border(1.dp, SlateBorder, RoundedCornerShape(10.dp))
-                        .padding(12.dp)
+                        .border(1.dp, SlateBorder, RoundedCornerShape(8.dp))
+                        .padding(10.dp)
                 ) {
                     Text(
                         text = item.content,
                         color = CharcoalText,
                         fontSize = 12.sp,
-                        lineHeight = 17.sp,
+                        lineHeight = 16.sp,
                         fontFamily = if (item.type == "CODE") FontFamily.Monospace else FontFamily.Default
                     )
                 }
 
-                Spacer(modifier = Modifier.height(16.dp))
+                Spacer(modifier = Modifier.height(14.dp))
 
                 Row(
                     modifier = Modifier.fillMaxWidth(),
@@ -1359,9 +1541,19 @@ private fun PayloadDetailDialog(
                     Button(
                         onClick = onDismiss,
                         colors = ButtonDefaults.buttonColors(containerColor = SlateBackground, contentColor = SlateSubtext),
-                        shape = RoundedCornerShape(8.dp)
+                        shape = RoundedCornerShape(6.dp),
+                        modifier = Modifier.focusable()
                     ) {
                         Text("Close")
+                    }
+                    Spacer(modifier = Modifier.width(8.dp))
+                    Button(
+                        onClick = { onReDownload(item) },
+                        colors = ButtonDefaults.buttonColors(containerColor = NavySecondary, contentColor = PureWhite),
+                        shape = RoundedCornerShape(6.dp),
+                        modifier = Modifier.focusable()
+                    ) {
+                        Text("Re-Download")
                     }
                     Spacer(modifier = Modifier.width(8.dp))
                     Button(
@@ -1370,7 +1562,8 @@ private fun PayloadDetailDialog(
                             onDismiss()
                         },
                         colors = ButtonDefaults.buttonColors(containerColor = NavyPrimary, contentColor = PureWhite),
-                        shape = RoundedCornerShape(8.dp)
+                        shape = RoundedCornerShape(6.dp),
+                        modifier = Modifier.focusable()
                     ) {
                         Text("Copy Content")
                     }
@@ -1380,7 +1573,7 @@ private fun PayloadDetailDialog(
     }
 }
 
-// ==================== REMOTE-FRIENDLY HOST IP DIALOG ====================
+// ==================== HOST IP DIALOG ====================
 @Composable
 private fun ServerIpDialog(
     currentIp: String,
@@ -1392,38 +1585,36 @@ private fun ServerIpDialog(
 
     Dialog(onDismissRequest = onDismiss) {
         Card(
-            shape = RoundedCornerShape(18.dp),
+            shape = RoundedCornerShape(16.dp),
             colors = CardDefaults.cardColors(containerColor = PureWhite),
             modifier = Modifier
-                .width(460.dp)
-                .border(1.dp, SlateBorder, RoundedCornerShape(18.dp))
+                .width(440.dp)
+                .border(1.dp, SlateBorder, RoundedCornerShape(16.dp))
         ) {
-            Column(modifier = Modifier.padding(22.dp)) {
+            Column(modifier = Modifier.padding(20.dp)) {
                 Text(
-                    text = "Configure Host IP Address",
+                    text = "Configure Host IP & Port",
                     color = CharcoalText,
-                    fontSize = 17.sp,
+                    fontSize = 16.sp,
                     fontWeight = FontWeight.Bold
                 )
 
-                Spacer(modifier = Modifier.height(6.dp))
+                Spacer(modifier = Modifier.height(4.dp))
 
                 Text(
-                    text = "Enter your Computer / Server Wi-Fi IP and Port (e.g. 192.168.1.2:4000). The QR code updates automatically.",
+                    text = "Enter computer or phone IP on same Wi-Fi. QR code updates automatically.",
                     color = SlateSubtext,
-                    fontSize = 12.sp
+                    fontSize = 11.sp
                 )
 
-                Spacer(modifier = Modifier.height(14.dp))
+                Spacer(modifier = Modifier.height(12.dp))
 
                 OutlinedTextField(
                     value = ipInput,
                     onValueChange = { ipInput = it },
                     label = { Text("Host IP & Port") },
                     singleLine = true,
-                    modifier = Modifier
-                        .fillMaxWidth()
-                        .testTag("host_ip_input"),
+                    modifier = Modifier.fillMaxWidth().testTag("host_ip_input"),
                     colors = OutlinedTextFieldDefaults.colors(
                         focusedBorderColor = NavyPrimary,
                         unfocusedBorderColor = SlateBorder,
@@ -1432,34 +1623,29 @@ private fun ServerIpDialog(
                     )
                 )
 
-                Spacer(modifier = Modifier.height(12.dp))
+                Spacer(modifier = Modifier.height(10.dp))
 
-                Text(
-                    text = "Quick Presets:",
-                    color = SlateSubtext,
-                    fontSize = 11.sp,
-                    fontWeight = FontWeight.SemiBold
-                )
-
-                Spacer(modifier = Modifier.height(6.dp))
+                Text("Quick Presets:", color = SlateSubtext, fontSize = 10.sp, fontWeight = FontWeight.SemiBold)
+                Spacer(modifier = Modifier.height(4.dp))
 
                 Row(
                     modifier = Modifier.fillMaxWidth(),
-                    horizontalArrangement = Arrangement.spacedBy(8.dp)
+                    horizontalArrangement = Arrangement.spacedBy(6.dp)
                 ) {
                     presets.forEach { preset ->
                         Box(
                             modifier = Modifier
-                                .clip(RoundedCornerShape(8.dp))
+                                .clip(RoundedCornerShape(6.dp))
                                 .background(if (ipInput == preset) NavyPrimary else SlateBackground)
-                                .border(1.dp, SlateBorder, RoundedCornerShape(8.dp))
+                                .border(1.dp, SlateBorder, RoundedCornerShape(6.dp))
                                 .clickable { ipInput = preset }
-                                .padding(horizontal = 8.dp, vertical = 6.dp)
+                                .focusable()
+                                .padding(horizontal = 6.dp, vertical = 5.dp)
                         ) {
                             Text(
                                 text = preset,
                                 color = if (ipInput == preset) PureWhite else CharcoalText,
-                                fontSize = 10.sp,
+                                fontSize = 9.sp,
                                 fontFamily = FontFamily.Monospace,
                                 fontWeight = FontWeight.SemiBold
                             )
@@ -1467,7 +1653,7 @@ private fun ServerIpDialog(
                     }
                 }
 
-                Spacer(modifier = Modifier.height(18.dp))
+                Spacer(modifier = Modifier.height(14.dp))
 
                 Row(
                     modifier = Modifier.fillMaxWidth(),
@@ -1476,7 +1662,8 @@ private fun ServerIpDialog(
                     Button(
                         onClick = onDismiss,
                         colors = ButtonDefaults.buttonColors(containerColor = SlateBackground, contentColor = SlateSubtext),
-                        shape = RoundedCornerShape(8.dp)
+                        shape = RoundedCornerShape(6.dp),
+                        modifier = Modifier.focusable()
                     ) {
                         Text("Cancel")
                     }
@@ -1484,118 +1671,10 @@ private fun ServerIpDialog(
                     Button(
                         onClick = { onSave(ipInput) },
                         colors = ButtonDefaults.buttonColors(containerColor = NavyPrimary, contentColor = PureWhite),
-                        shape = RoundedCornerShape(8.dp)
+                        shape = RoundedCornerShape(6.dp),
+                        modifier = Modifier.focusable()
                     ) {
-                        Text("Save & Update QR")
-                    }
-                }
-            }
-        }
-    }
-}
-
-// ==================== WIRELESS INSTALL GUIDE DIALOG (LocalSend & APK) ====================
-@Composable
-private fun WirelessInstallGuideDialog(
-    onDismiss: () -> Unit
-) {
-    Dialog(onDismissRequest = onDismiss) {
-        Card(
-            shape = RoundedCornerShape(18.dp),
-            colors = CardDefaults.cardColors(containerColor = PureWhite),
-            modifier = Modifier
-                .width(540.dp)
-                .border(1.dp, SlateBorder, RoundedCornerShape(18.dp))
-        ) {
-            Column(
-                modifier = Modifier
-                    .padding(22.dp)
-                    .verticalScroll(rememberScrollState())
-            ) {
-                Row(
-                    modifier = Modifier.fillMaxWidth(),
-                    horizontalArrangement = Arrangement.SpaceBetween,
-                    verticalAlignment = Alignment.CenterVertically
-                ) {
-                    Row(verticalAlignment = Alignment.CenterVertically) {
-                        Box(
-                            modifier = Modifier
-                                .size(36.dp)
-                                .clip(RoundedCornerShape(8.dp))
-                                .background(NavyPrimary),
-                            contentAlignment = Alignment.Center
-                        ) {
-                            Icon(Icons.Default.Download, contentDescription = null, tint = PureWhite, modifier = Modifier.size(20.dp))
-                        }
-                        Spacer(modifier = Modifier.width(10.dp))
-                        Text(
-                            text = "TV Wireless Install Guide",
-                            color = CharcoalText,
-                            fontSize = 17.sp,
-                            fontWeight = FontWeight.Bold
-                        )
-                    }
-
-                    Box(
-                        modifier = Modifier
-                            .clip(RoundedCornerShape(6.dp))
-                            .background(NavyPrimary)
-                            .padding(horizontal = 8.dp, vertical = 3.dp)
-                    ) {
-                        Text("No USB Needed", color = PureWhite, fontSize = 10.sp, fontWeight = FontWeight.Bold)
-                    }
-                }
-
-                Spacer(modifier = Modifier.height(14.dp))
-
-                // Section 1: LocalSend Official Installation
-                Text(
-                    text = "1. How to Install LocalSend on Android TV",
-                    color = CharcoalText,
-                    fontSize = 13.sp,
-                    fontWeight = FontWeight.Bold
-                )
-                Spacer(modifier = Modifier.height(4.dp))
-                Text(
-                    text = "• Option A (Google Play): Open the Google Play Store on your Android TV, search for 'LocalSend', and click Install.\n" +
-                           "• Option B (TV Browser / Downloader): Open 'Downloader by AFTVnews' on your TV and visit https://localsend.org or GitHub: https://github.com/localsend/localsend/releases to download the APK.",
-                    color = SlateSubtext,
-                    fontSize = 12.sp,
-                    lineHeight = 17.sp
-                )
-
-                Spacer(modifier = Modifier.height(12.dp))
-
-                // Section 2: Installing PVT TV APK without USB
-                Text(
-                    text = "2. How to Install this PVT TV App onto your TV via LocalSend",
-                    color = CharcoalText,
-                    fontSize = 13.sp,
-                    fontWeight = FontWeight.Bold
-                )
-                Spacer(modifier = Modifier.height(4.dp))
-                Text(
-                    text = "• Step 1: On your Laptop/Phone, download the PVT TV APK from the AI Studio top bar (Settings / Export APK).\n" +
-                           "• Step 2: Open LocalSend on your Laptop or Phone (connected to the same Wi-Fi).\n" +
-                           "• Step 3: Select the PVT TV .apk file and choose your Android TV as the recipient.\n" +
-                           "• Step 4: On the TV, accept the file and tap 'Open' to install it directly without any USB cable!",
-                    color = SlateSubtext,
-                    fontSize = 12.sp,
-                    lineHeight = 17.sp
-                )
-
-                Spacer(modifier = Modifier.height(18.dp))
-
-                Row(
-                    modifier = Modifier.fillMaxWidth(),
-                    horizontalArrangement = Arrangement.End
-                ) {
-                    Button(
-                        onClick = onDismiss,
-                        colors = ButtonDefaults.buttonColors(containerColor = NavyPrimary, contentColor = PureWhite),
-                        shape = RoundedCornerShape(8.dp)
-                    ) {
-                        Text("Got it")
+                        Text("Save & Update")
                     }
                 }
             }

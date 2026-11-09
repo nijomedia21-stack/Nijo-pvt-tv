@@ -121,25 +121,47 @@ class FirestoreRepository(private val db: FirebaseFirestore) {
             TransferItem(
                 id = "tr_libra_tokens",
                 userId = "nijo_tv_profile",
-                title = "Libra Brand Color Tokens (Hex & JSON)",
+                title = "brand_tokens.json",
+                fileName = "brand_tokens.json",
                 content = "PRIMARY_NAVY = #0F294A;\nSECONDARY_BLUE = #1E3A8A;\nACCENT_CYAN = #0284C7;\nBACKGROUND = #F8FAFC;\nTEXT_CHARCOAL = #0F172A;",
                 type = "CODE",
-                fileSize = "142 bytes",
-                devices = listOf("Laptop (Windows 11)", "Mobile (Android)", "Smart TV (Living Room)"),
-                status = "SYNCED",
-                pinVerified = true
+                fileSize = "142 KB",
+                devices = listOf("All 3 Devices"),
+                status = "AUTO-DOWNLOADED",
+                pinVerified = true,
+                sender = "laptop",
+                target = "all",
+                downloadUrl = "http://192.168.1.2:4000/download/brand_tokens.json"
             ),
             TransferItem(
                 id = "tr_maths_notes",
                 userId = "nijo_tv_profile",
-                title = "Maths I Cayley-Hamilton & Eigenvalue Derivations.pdf",
+                title = "document_exam_notes.pdf",
+                fileName = "document_exam_notes.pdf",
                 content = "Comprehensive formula sheet for Semester 1 Polytechnic exams.",
                 type = "FILE",
-                fileName = "Maths_I_Formulas.pdf",
                 fileSize = "2.4 MB",
-                devices = listOf("Laptop (Windows 11)", "Smart TV (Living Room)"),
-                status = "SYNCED",
-                pinVerified = true
+                devices = listOf("TV", "Laptop"),
+                status = "AUTO-DOWNLOADED",
+                pinVerified = true,
+                sender = "laptop",
+                target = "tv",
+                downloadUrl = "http://192.168.1.2:4000/download/document_exam_notes.pdf"
+            ),
+            TransferItem(
+                id = "tr_camera_photo",
+                userId = "nijo_tv_profile",
+                title = "camera_capture.jpg",
+                fileName = "camera_capture.jpg",
+                content = "Ultra HD camera snapshot transferred to living room TV.",
+                type = "IMAGE",
+                fileSize = "3.1 MB",
+                devices = listOf("TV", "Mobile"),
+                status = "AUTO-DOWNLOADED",
+                pinVerified = true,
+                sender = "mobile",
+                target = "tv",
+                downloadUrl = "http://192.168.1.2:4000/download/camera_capture.jpg"
             )
         )
         localTransfers.value = defaultTransfers
@@ -382,6 +404,33 @@ class FirestoreRepository(private val db: FirebaseFirestore) {
                 docRef.set(payload).await()
             } catch (e: Exception) {
                 Log.w(TAG, "Error adding transfer to Firestore: ${e.message}")
+            }
+        }
+    }
+
+    suspend fun deleteTransfer(transferId: String) {
+        localTransfers.value = localTransfers.value.filter { it.id != transferId }
+        val uid = auth.currentUser?.uid
+        if (uid != null) {
+            try {
+                db.collection("users").document(uid).collection("transfers").document(transferId).delete().await()
+            } catch (e: Exception) {
+                Log.w(TAG, "Error deleting transfer from Firestore: ${e.message}")
+            }
+        }
+    }
+
+    suspend fun clearAllTransfers() {
+        localTransfers.value = emptyList()
+        val uid = auth.currentUser?.uid
+        if (uid != null) {
+            try {
+                val snapshot = db.collection("users").document(uid).collection("transfers").get().await()
+                for (doc in snapshot.documents) {
+                    doc.reference.delete().await()
+                }
+            } catch (e: Exception) {
+                Log.w(TAG, "Error clearing transfers from Firestore: ${e.message}")
             }
         }
     }
